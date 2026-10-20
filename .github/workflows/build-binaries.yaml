@@ -1,0 +1,254 @@
+# eDEX-UI — 打包与发布工作流（Electron 31 分支）
+#
+# 设计要点：
+#   * 普通 push / PR 只上传构建产物（artifact），绝不发布 GitHub Release；
+#   * 只有推送 v* 标签时，才由 release job 创建 Release 并附加安装包；
+#   * 构建时**不注入 GH_TOKEN**，并显式使用 --publish never，
+#     避免 package.json 中的 "publish": "github" 触发误发布。
+#   * Node 20 + actions/*@v4（Node 12/16 运行时已被 GitHub 停用）。
+#
+# 网络受限环境（例如自建 runner 拉不到 GitHub 的 release 资源）可启用下面的镜像兜底，
+# 取消注释并把它放到 jobs: 上方的顶层 env: 中即可；GitHub 托管 runner 无需设置。
+#   env:
+#     ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+#     ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
+
+name: Build release binaries
+
+on:
+  push:
+    branches: ['**']   # 任意分支的 push：只产出 artifact
+    tags: ['v*']       # v 开头的 tag：额外触发 release job 创建 Release
+  pull_request:        # PR：只产出 artifact，不发布
+  workflow_dispatch:   # 手动触发（也可用于手动构建 macOS dmg）
+
+# 默认只读权限，发布 job 单独提升为 contents: write
+permissions:
+  contents: read
+
+# 同一 ref 的重复运行互相取消；tag（发布会话）不取消，避免发布进行到一半被打断
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  # ---------------------------------------------------------------- Windows x64
+  build-windows:
+    name: Windows x64 (NSIS installer)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        # 不拉取 submodules：.gitmodules 里 bytesize-icons 用的是 SSH 地址，
+        # CI 没有部署密钥会直接失败，而打包并不需要 file-icons 子模块的内容。
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            src/package-lock.json
+
+      # 缓存 Electron 二进制，以及 electron-builder 的 winCodeSign / nsis 资源
+      - name: Cache Electron binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/AppData/Local/electron/Cache
+            ~/AppData/Local/electron-builder/Cache
+          key: ${{ runner.os }}-electron-${{ hashFiles('package-lock.json', 'src/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
+
+      # prebuild-windows 内部使用 mkdir，目录已存在会失败；先清掉可能残留的目录
+      - name: Clean previous build output
+        shell: pwsh
+        run: Remove-Item -Recurse -Force prebuild-src, dist -ErrorAction SilentlyContinue
+
+      # prebuild 依赖 terser / clean-css / node-json-minify，所以必须先装根依赖
+      - name: Install build dependencies
+        run: npm install
+
+      # 顺序固定不可颠倒：复制 src/（排除 node_modules）→ prebuild-minify.js → prebuild-src 内 npm install
+      - name: Run prebuild script
+        run: npm run prebuild-windows
+
+      # npm run build-windows === electron-builder build -w --x64 --publish never
+      # 注意：绝不要在同一次调用里加上 --ia32，否则 electron-builder 的
+      # verifyInstallerSize 会把两个架构的载荷求和后与单个安装包比较而误报失败。
+      # 需要 32 位产物时单独执行 npm run build-windows-ia32。
+      - name: Build Windows x64 installer
+        run: npm run build-windows
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-Installer
+          # latest.yml / *.blockmap 是自动更新元数据，一并带上
+          path: |
+            dist/*.exe
+            dist/*.exe.blockmap
+            dist/latest.yml
+          if-no-files-found: error
+
+  # --------------------------------------------------------------- Linux x64
+  build-linux:
+    name: Linux x64 (AppImage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        # 同上：不拉取 submodules
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            src/package-lock.json
+
+      - name: Cache Electron binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: ${{ runner.os }}-electron-${{ hashFiles('package-lock.json', 'src/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
+
+      - name: Clean previous build output
+        run: rm -rf prebuild-src dist
+
+      - name: Install build dependencies
+        run: npm install
+
+      # prebuild-linux 使用 rsync（ubuntu-latest 自带）；node-pty 1.1.0 在 Linux 没有
+      # 预编译产物，会由 node-gyp 现场编译，依赖 python3 / make / g++（runner 均自带）。
+      - name: Run prebuild script
+        run: npm run prebuild-linux
+
+      # 只构建 x64。仓库的 npm run build-linux 会同时构建 ia32/arm64/armv7l，
+      # 需要 multilib 与 QEMU，复杂且易失败，这里直接用 electron-builder 构建 x64。
+      - name: Build Linux x64 AppImage
+        run: ./node_modules/.bin/electron-builder build -l --x64 --publish never
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: Linux-AppImage
+          path: |
+            dist/*.AppImage
+            dist/latest-linux.yml
+          if-no-files-found: error
+
+  # ------------------------------------------- macOS x64（可选，仅手动触发）
+  # 不参与 release（needs 里没有它）。dmg 未签名/未公证，因此默认不放进公开 Release，
+  # 仅手动运行时产出 artifact 供自测。若希望 Release 附带 dmg，把本 job 加入 release 的 needs。
+  build-darwin:
+    name: macOS x64 (dmg, manual only)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            src/package-lock.json
+
+      - name: Cache Electron binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+          key: ${{ runner.os }}-electron-${{ hashFiles('package-lock.json', 'src/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
+
+      - name: Clean previous build output
+        run: rm -rf prebuild-src dist
+
+      - name: Install build dependencies
+        run: npm install
+
+      - name: Run prebuild script
+        run: npm run prebuild-darwin
+
+      # 仓库的 npm run build-darwin 没带 --publish never，这里直接调 CLI 补上，
+      # 避免 electron-builder 在 tag 上尝试发布。同时关闭证书自动发现以免签名失败。
+      - name: Build macOS dmg
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: ./node_modules/.bin/electron-builder build -m --x64 --publish never
+
+      - name: Upload dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: macOS-Image
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  # ------------------------------------------------------------ 仅 tag 才发布
+  release:
+    name: Create GitHub Release
+    needs: [build-windows, build-linux]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write   # 创建 Release 并上传附件所需
+    steps:
+      - name: Checkout (release notes template)
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      # 因为二进制未签名，发布时附上 SHA256 供用户校验下载完整性
+      - name: Generate SHA256 checksums
+        run: |
+          cd release-assets
+          : > SHA256SUMS.txt
+          for f in *.exe *.AppImage *.dmg; do
+            if [ -f "$f" ]; then sha256sum "$f" >> SHA256SUMS.txt; fi
+          done
+          echo "--- SHA256SUMS.txt ---"
+          cat SHA256SUMS.txt
+
+      - name: List assets to be released
+        run: ls -lh release-assets
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-assets/*.exe
+            release-assets/*.exe.blockmap
+            release-assets/*.AppImage
+            release-assets/*.dmg
+            release-assets/*.yml
+            release-assets/SHA256SUMS.txt
+          # 发布正文使用固定模板（含 Windows SmartScreen / 未签名说明、Linux 用法、许可）
+          body_path: docs/RELEASE_NOTES.md
+          # 可选的 dmg 等缺失时不致整场失败；exe / AppImage 由 needs 保证存在
+          fail_on_unmatched_files: false
+          draft: false
+          # 形如 v2.3.0-beta.1 的标签自动标记为预发布
+          prerelease: ${{ contains(github.ref_name, '-') }}

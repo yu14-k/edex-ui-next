@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 使用问题 / Questions
+    url: https://github.com/yu14-k/edex-ui-next/issues
+    about: 遇到使用问题？请先搜索已有 Issue 再新建（请附版本号与操作系统）。
+  - name: 上游原项目 / Upstream project
+    url: https://github.com/GitSquared/edex-ui
+    about: 本仓库是上游 eDEX-UI 的 fork（上游已归档）；上游历史问题请参考原仓库。
+  - name: 安全漏洞 / Security
+    url: https://github.com/yu14-k/edex-ui-next/security/advisories/new
+    about: 请勿公开披露未修复的安全漏洞，请使用私密漏洞报告。

@@ -1,0 +1,104 @@
+class Sysinfo {
+    constructor(parentId) {
+        if (!parentId) throw "Missing parameters";
+
+        // See #255
+        this._os = window.__edex.os;
+        const os = this._os;
+        let osName;
+        switch (os.platform()) {
+            case "darwin":
+                osName = "macOS";
+                break;
+            case "win32":
+                osName = "win";
+                break;
+            default:
+                osName = os.platform();
+        }
+
+        // Create DOM
+        this.parent = document.getElementById(parentId);
+        this.parent.innerHTML += `<div id="mod_sysinfo">
+            <div>
+                <h1>1970</h1>
+                <h2>JAN 1</h2>
+            </div>
+            <div>
+                <h1>UPTIME</h1>
+                <h2>0:0:0</h2>
+            </div>
+            <div>
+                <h1>TYPE</h1>
+                <h2>${osName}</h2>
+            </div>
+            <div>
+                <h1>POWER</h1>
+                <h2>00%</h2>
+            </div>
+        </div>`;
+
+        this.updateDate();
+        this.updateUptime();
+        this.uptimeUpdater = setInterval(() => {
+            this.updateUptime();
+        }, 60000);
+        this.updateBattery();
+        this.batteryUpdater = setInterval(() => {
+            this.updateBattery();
+        }, 3000);
+    }
+    updateDate() {
+        let time = new Date();
+
+        document.querySelector("#mod_sysinfo > div:first-child > h1").innerHTML = time.getFullYear();
+
+        let months = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+        let month = months[time.getMonth()];
+        document.querySelector("#mod_sysinfo > div:first-child > h2").innerHTML = month+" "+time.getDate();
+
+        let timeToNewDay = ((23 - time.getHours()) * 3600000) + ((59 - time.getMinutes()) * 60000);
+        setTimeout(() => {
+            this.updateDate();
+        }, timeToNewDay);
+    }
+    updateUptime() {
+        let uptime = {
+            raw: Math.floor(this._os.uptime()),
+            days: 0,
+            hours: 0,
+            minutes: 0
+        };
+
+        uptime.days = Math.floor(uptime.raw/86400);
+        uptime.raw -= uptime.days*86400;
+        uptime.hours = Math.floor(uptime.raw/3600);
+        uptime.raw -= uptime.hours*3600;
+        uptime.minutes = Math.floor(uptime.raw/60);
+
+        if (uptime.hours.toString().length !== 2) uptime.hours = "0"+uptime.hours;
+        if (uptime.minutes.toString().length !== 2) uptime.minutes = "0"+uptime.minutes;
+
+        document.querySelector("#mod_sysinfo > div:nth-child(2) > h2").innerHTML = uptime.days + '<span style="opacity:0.5;">d</span>' + uptime.hours + '<span style="opacity:0.5;">:</span>' + uptime.minutes;
+    }
+    updateBattery() {
+        window.si.battery().then(bat => {
+            let indicator = document.querySelector("#mod_sysinfo > div:last-child > h2");
+            if (bat.hasBattery) {
+                if (bat.isCharging) {
+                    indicator.innerHTML = "CHARGE";
+                } else if (bat.acConnected) {
+                    indicator.innerHTML = "WIRED";
+                } else {
+                    indicator.innerHTML = bat.percent+"%";
+                }
+            } else {
+                indicator.innerHTML = "ON";
+            }
+        });
+    }
+}
+
+module.exports = {
+    Sysinfo
+};
