@@ -43,10 +43,10 @@ jobs:
         # 不拉取 submodules：.gitmodules 里 bytesize-icons 用的是 SSH 地址，
         # CI 没有部署密钥会直接失败，而打包并不需要 file-icons 子模块的内容。
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 24
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           cache: npm
           cache-dependency-path: |
             package-lock.json
@@ -105,10 +105,10 @@ jobs:
         uses: actions/checkout@v4
         # 同上：不拉取 submodules
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 24
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           cache: npm
           cache-dependency-path: |
             package-lock.json
@@ -161,10 +161,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 24
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           cache: npm
           cache-dependency-path: |
             package-lock.json
