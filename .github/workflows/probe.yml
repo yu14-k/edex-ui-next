@@ -63,6 +63,13 @@ jobs:
       - name: Install app dependencies
         run: npm --prefix src install
 
+      # GitHub runner 上 electron 的 chrome-sandbox 不是 root:root 4755，
+      # Chromium 会直接 FATAL 退出；改成正确权限比 --no-sandbox 更接近真实运行环境。
+      - name: Fix chrome-sandbox permissions
+        run: |
+          sudo chown root:root node_modules/electron/dist/chrome-sandbox
+          sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
+
       # node-pty 1.1.0 走 N-API，通常无需针对 Electron 重编；失败不阻塞（由探针判定）
       - name: Rebuild node-pty for Electron (best effort)
         continue-on-error: true
