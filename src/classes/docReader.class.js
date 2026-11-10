@@ -1,12 +1,23 @@
 class DocReader {
     constructor(opts) {
-        pdfjsLib.GlobalWorkerOptions.workerSrc = './node_modules/pdfjs-dist/build/pdf.worker.js';
+        // pdfjs-dist 6 is ESM-only: it is bundled into a classic script by
+        // `npm run vendor` (see vendor.js) because Chromium refuses to execute
+        // ES *module scripts* from a file:// page. Module *workers* are allowed,
+        // so the worker file is referenced directly.
+        const pdfBase = './assets/vendor/pdfjs/';
+        pdfjsLib.GlobalWorkerOptions.workerSrc = pdfBase + 'pdf.worker.mjs';
         const modalElementId = "modal_" + opts.modalId;
         const path = opts.path;
         const scale = 1;
         const canvas = document.getElementById(modalElementId).querySelector(".pdf_canvas");
         const context = canvas.getContext('2d');
-        const loadingTask = pdfjsLib.getDocument(path);
+        const loadingTask = pdfjsLib.getDocument({
+            url: path,
+            cMapUrl: pdfBase + 'cmaps/',
+            cMapPacked: true,
+            standardFontDataUrl: pdfBase + 'standard_fonts/',
+            wasmUrl: pdfBase + 'wasm/'
+        });
         let pdfDoc = null;
         let renderingPromise = null;
         let pageNum = 1,

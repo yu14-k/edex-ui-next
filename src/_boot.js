@@ -61,6 +61,11 @@ if (!gotLock) {
 
 signale.time("Startup");
 
+// DevTools are a debugging aid, not a shipping feature: they are only enabled
+// when the operator opts in (EDEX_DEBUG=1), so a renderer-side compromise cannot
+// silently open an inspector with IPC access to the main process.
+const ALLOW_DEVTOOLS = process.env.EDEX_DEBUG === "1" || process.env.EDEX_DEBUG === "true";
+
 const electron = require("electron");
 const ipc = electron.ipcMain;
 const path = require("path");
@@ -73,6 +78,8 @@ const NetService = require("./_netService.js");
 const netService = new NetService();
 
 ipc.on("log", (e, type, content) => {
+    // Only the app's own renderer may write into the main-process log
+    if (!win || win.isDestroyed() || !e || !e.sender || e.sender !== win.webContents) return;
     // Guard against an unknown/typo'd log type turning into a fatal crash
     if (typeof signale[type] === "function") {
         signale[type](content);
@@ -141,6 +148,30 @@ function registerBridgeIpc() {
     });
 
     ipc.handle("edex:clipboard:readText", (e) => { if (!fromMain(e)) throw new Error("unauthorized"); return clipboard.readText(); });
+    ipc.handle("edex:clipboard:writeText", (e, text) => {
+        if (!fromMain(e)) throw new Error("unauthorized");
+        if (typeof text !== "string") return false;
+        return clipboard.writeText(text) || true;
+    });
+
+    // Built-in screenshot: many fullscreen/GPU setups make OS snipping tools show
+    // a black or wrong surface, so the app can capture itself and save a PNG.
+    ipc.handle("edex:app:screenshot", async (e) => {
+        if (!fromMain(e)) throw new Error("unauthorized");
+        if (!win || win.isDestroyed()) throw new Error("no window");
+        const image = await win.webContents.capturePage();
+        const dir = path.join(app.getPath("pictures"), "eDEX-UI");
+        try {
+            fs.mkdirSync(dir, { recursive: true });
+        } catch (err) {
+            // already exists
+        }
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-").replace("Z", "");
+        const file = path.join(dir, `eDEX-UI_${stamp}.png`);
+        fs.writeFileSync(file, image.toPNG());
+        signale.info(`Screenshot saved to ${file}`);
+        return file;
+    });
 
     // Global shortcuts: renderer asks main to (re)register; main forwards
     // triggered triggers back to the renderer.
@@ -169,12 +200,21 @@ function registerBridgeIpc() {
     });
     ipc.handle("edex:win:isMaximized", (e) => { if (!fromMain(e)) throw new Error("unauthorized"); return (win ? win.isMaximized() : false); });
     ipc.on("edex:win:unmaximize", (e) => { if (fromMain(e) && win) win.unmaximize(); });
-    ipc.on("edex:win:toggleDevTools", (e) => { if (fromMain(e) && win) win.webContents.toggleDevTools(); });
+    ipc.on("edex:win:toggleDevTools", (e) => {
+        // DevTools stay closed unless explicitly enabled at launch (EDEX_DEBUG=1)
+        if (!ALLOW_DEVTOOLS) {
+            signale.warn("DevTools toggle denied (set EDEX_DEBUG=1 to enable)");
+            return;
+        }
+        if (fromMain(e) && win) win.webContents.toggleDevTools();
+    });
 
     ipc.handle("edex:username", async (e) => {
         if (!fromMain(e)) throw new Error("unauthorized");
         try {
-            return await require("username")() || null;
+            // `username` 7 is ESM-only -> require(esm) namespace, function on `.username`
+            const { username } = require("username");
+            return await username() || null;
         } catch (err) {
             return null;
         }
@@ -241,6 +281,17 @@ function registerBridgeIpc() {
         return netService.geoLookup(ip);
     });
     ipc.handle("edex:net:geoReady", (e) => { if (!fromMain(e)) throw new Error("unauthorized"); return netService.geoReady(); });
+
+    // Default config payload: the single source of truth for repairing a
+    // corrupted settings/shortcuts/window-state file from the renderer.
+    ipc.handle("edex:config:defaults", (e) => {
+        if (!fromMain(e)) throw new Error("unauthorized");
+        return {
+            settings: DEFAULT_SETTINGS,
+            shortcuts: DEFAULT_SHORTCUTS,
+            lastWindowState: DEFAULT_LAST_WINDOW_STATE
+        };
+    });
 }
 
 registerBridgeIpc();
@@ -274,57 +325,87 @@ try {
     signale.info(`Base config dir is ${electron.app.getPath("userData")}`);
 }
 // Create default settings file
+const DEFAULT_SETTINGS = {
+    shell: (process.platform === "win32") ? "powershell.exe" : "bash",
+    shellArgs: '',
+    cwd: electron.app.getPath("userData"),
+    keyboard: "en-US",
+    theme: "tron",
+    termFontSize: 15,
+    audio: true,
+    audioVolume: 1.0,
+    disableFeedbackAudio: false,
+    clockHours: 24,
+    pingAddr: "1.1.1.1",
+    port: 3000,
+    nointro: false,
+    nocursor: false,
+    forceFullscreen: true,
+    allowWindowed: false,
+    excludeThreadsFromToplist: true,
+    hideDotfiles: false,
+    fsListView: false,
+    experimentalGlobeFeatures: false,
+    experimentalFeatures: false
+};
+
+// Read a JSON config file defensively: a corrupted file is backed up as ".bak"
+// and replaced by the given default instead of crashing the main process on
+// `require()` (which throws on invalid JSON).
+function readConfigJson(file, fallback) {
+    try {
+        if (fs.existsSync(file)) {
+            return JSON.parse(fs.readFileSync(file, "utf-8"));
+        }
+    } catch (e) {
+        signale.warn(`Invalid JSON in ${file}, restoring defaults: ${e && e.message ? e.message : e}`);
+        try {
+            if (fs.existsSync(file)) {
+                fs.copyFileSync(file, file + ".bak");
+            }
+        } catch (err) {
+            // best effort only
+        }
+    }
+    try {
+        fs.writeFileSync(file, JSON.stringify(fallback, "", 4), "utf-8");
+    } catch (e) {
+        signale.warn(`Could not write default config ${file}: ${e && e.message ? e.message : e}`);
+    }
+    return fallback;
+}
+
 if (!fs.existsSync(settingsFile)) {
-    fs.writeFileSync(settingsFile, JSON.stringify({
-        shell: (process.platform === "win32") ? "powershell.exe" : "bash",
-        shellArgs: '',
-        cwd: electron.app.getPath("userData"),
-        keyboard: "en-US",
-        theme: "tron",
-        termFontSize: 15,
-        audio: true,
-        audioVolume: 1.0,
-        disableFeedbackAudio: false,
-        clockHours: 24,
-        pingAddr: "1.1.1.1",
-        port: 3000,
-        nointro: false,
-        nocursor: false,
-        forceFullscreen: true,
-        allowWindowed: false,
-        excludeThreadsFromToplist: true,
-        hideDotfiles: false,
-        fsListView: false,
-        experimentalGlobeFeatures: false,
-        experimentalFeatures: false
-    }, "", 4));
+    fs.writeFileSync(settingsFile, JSON.stringify(DEFAULT_SETTINGS, "", 4));
     signale.info(`Default settings written to ${settingsFile}`);
 }
 // Create default shortcuts file
+const DEFAULT_SHORTCUTS = [
+    { type: "app", trigger: "Ctrl+Shift+C", action: "COPY", enabled: true },
+    { type: "app", trigger: "Ctrl+Shift+V", action: "PASTE", enabled: true },
+    { type: "app", trigger: "Ctrl+Tab", action: "NEXT_TAB", enabled: true },
+    { type: "app", trigger: "Ctrl+Shift+Tab", action: "PREVIOUS_TAB", enabled: true },
+    { type: "app", trigger: "Ctrl+X", action: "TAB_X", enabled: true },
+    { type: "app", trigger: "Ctrl+Shift+S", action: "SETTINGS", enabled: true },
+    { type: "app", trigger: "Ctrl+Shift+K", action: "SHORTCUTS", enabled: true },
+    { type: "app", trigger: "Ctrl+Shift+F", action: "FUZZY_SEARCH", enabled: true },
+    { type: "app", trigger: "Ctrl+Shift+L", action: "FS_LIST_VIEW", enabled: true },
+    { type: "app", trigger: "Ctrl+Shift+H", action: "FS_DOTFILES", enabled: true },
+    { type: "app", trigger: "Ctrl+Shift+P", action: "KB_PASSMODE", enabled: true },
+    { type: "app", trigger: "Ctrl+Shift+F12", action: "SCREENSHOT", enabled: true },
+    { type: "app", trigger: "Ctrl+Shift+I", action: "DEV_DEBUG", enabled: false },
+    { type: "app", trigger: "Ctrl+Shift+F5", action: "DEV_RELOAD", enabled: true },
+    { type: "shell", trigger: "Ctrl+Shift+Alt+Space", action: "neofetch", linebreak: true, enabled: false }
+];
+const DEFAULT_LAST_WINDOW_STATE = { useFullscreen: true };
+
 if (!fs.existsSync(shortcutsFile)) {
-    fs.writeFileSync(shortcutsFile, JSON.stringify([
-        { type: "app", trigger: "Ctrl+Shift+C", action: "COPY", enabled: true },
-        { type: "app", trigger: "Ctrl+Shift+V", action: "PASTE", enabled: true },
-        { type: "app", trigger: "Ctrl+Tab", action: "NEXT_TAB", enabled: true },
-        { type: "app", trigger: "Ctrl+Shift+Tab", action: "PREVIOUS_TAB", enabled: true },
-        { type: "app", trigger: "Ctrl+X", action: "TAB_X", enabled: true },
-        { type: "app", trigger: "Ctrl+Shift+S", action: "SETTINGS", enabled: true },
-        { type: "app", trigger: "Ctrl+Shift+K", action: "SHORTCUTS", enabled: true },
-        { type: "app", trigger: "Ctrl+Shift+F", action: "FUZZY_SEARCH", enabled: true },
-        { type: "app", trigger: "Ctrl+Shift+L", action: "FS_LIST_VIEW", enabled: true },
-        { type: "app", trigger: "Ctrl+Shift+H", action: "FS_DOTFILES", enabled: true },
-        { type: "app", trigger: "Ctrl+Shift+P", action: "KB_PASSMODE", enabled: true },
-        { type: "app", trigger: "Ctrl+Shift+I", action: "DEV_DEBUG", enabled: false },
-        { type: "app", trigger: "Ctrl+Shift+F5", action: "DEV_RELOAD", enabled: true },
-        { type: "shell", trigger: "Ctrl+Shift+Alt+Space", action: "neofetch", linebreak: true, enabled: false }
-    ], "", 4));
+    fs.writeFileSync(shortcutsFile, JSON.stringify(DEFAULT_SHORTCUTS, "", 4));
     signale.info(`Default keymap written to ${shortcutsFile}`);
 }
 //Create default window state file
 if(!fs.existsSync(lastWindowStateFile)) {
-    fs.writeFileSync(lastWindowStateFile, JSON.stringify({
-        useFullscreen: true
-    }, "", 4));
+    fs.writeFileSync(lastWindowStateFile, JSON.stringify(DEFAULT_LAST_WINDOW_STATE, "", 4));
     signale.info(`Default last window state written to ${lastWindowStateFile}`);
 }
 
@@ -353,7 +434,7 @@ mirrorDir(innerFontsDir, fontsDir);
 
 // Version history logging
 const versionHistoryPath = path.join(electron.app.getPath("userData"), "versions_log.json");
-var versionHistory = fs.existsSync(versionHistoryPath) ? require(versionHistoryPath) : {};
+var versionHistory = readConfigJson(versionHistoryPath, {});
 var version = app.getVersion();
 if (typeof versionHistory[version] === "undefined") {
 	versionHistory[version] = {
@@ -390,7 +471,7 @@ function createWindow(settings) {
         frame: settings.allowWindowed || false,
         backgroundColor: '#000000',
         webPreferences: {
-            devTools: true,
+            devTools: ALLOW_DEVTOOLS,
             // Modern secure model: renderer is isolated, has no Node access,
             // and only talks to the main process through the curated preload bridge.
             contextIsolation: true,
@@ -427,7 +508,7 @@ function createWindow(settings) {
     });
     if (!settings.allowWindowed) {
         win.setResizable(false);
-    } else if (!require(lastWindowStateFile)["useFullscreen"]) {
+    } else if (!readConfigJson(lastWindowStateFile, {useFullscreen: true})["useFullscreen"]) {
         win.setFullScreen(false);
     }
 
@@ -436,7 +517,7 @@ function createWindow(settings) {
 
 app.on('ready', async () => {
     signale.pending(`Loading settings file...`);
-    let settings = require(settingsFile);
+    let settings = readConfigJson(settingsFile, DEFAULT_SETTINGS);
     signale.pending(`Resolving shell path...`);
     settings.shell = await which(settings.shell).catch(e => { throw(e) });
     signale.info(`Shell found at ${settings.shell}`);
@@ -445,7 +526,9 @@ app.on('ready', async () => {
     if (!require("fs").existsSync(settings.cwd)) throw new Error("Configured cwd path does not exist.");
 
     // See #366
-    let cleanEnv = await require("shell-env")(settings.shell).catch(e => { throw e; });
+    // `shell-env` 4 is ESM-only -> require(esm) namespace, function on `.shellEnv`
+    const { shellEnv } = require("shell-env");
+    let cleanEnv = await shellEnv(settings.shell).catch(e => { throw e; });
 
     Object.assign(cleanEnv, {
         TERM: "xterm-256color",
@@ -551,26 +634,46 @@ app.on('ready', async () => {
     // Backend support for theme and keyboard hotswitch
     let themeOverride = null;
     let kbOverride = null;
+    // Sender check: these used to accept any renderer/frame
+    const fromMainWindow = (e) => {
+        try {
+            return !!(win && !win.isDestroyed() && e && e.sender === win.webContents);
+        } catch (err) {
+            return false;
+        }
+    };
     ipc.on("getThemeOverride", (e, arg) => {
+        if (!fromMainWindow(e)) return;
         e.sender.send("getThemeOverride", themeOverride);
     });
     ipc.on("getKbOverride", (e, arg) => {
+        if (!fromMainWindow(e)) return;
         e.sender.send("getKbOverride", kbOverride);
     });
     ipc.on("setThemeOverride", (e, arg) => {
+        if (!fromMainWindow(e)) return;
+        if (typeof arg !== "string" || arg.length === 0 || arg.length > 100) return;
         themeOverride = arg;
     });
     ipc.on("setKbOverride", (e, arg) => {
+        if (!fromMainWindow(e)) return;
+        if (typeof arg !== "string" || arg.length === 0 || arg.length > 100) return;
         kbOverride = arg;
     });
 });
 
 app.on('web-contents-created', (e, contents) => {
-    // Prevent creating more than one window
-    contents.on('new-window', (e, url) => {
-        e.preventDefault();
-        shell.openExternal(url);
+    // Prevent creating more than one window: 'new-window' was removed in Electron
+    // 25, so the modern handler is the only one that actually runs.
+    contents.setWindowOpenHandler(({ url }) => {
+        if (/^https?:\/\//i.test(url)) {
+            shell.openExternal(url);
+        }
+        return { action: "deny" };
     });
+
+    // Legacy 'new-window' is NOT re-registered: the event no longer exists in
+    // Electron 25+, so keeping it would be dead code.
 
     // Prevent loading something else than the UI
     contents.on('will-navigate', (e, url) => {
@@ -584,11 +687,36 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
-    tty.close();
-    Object.keys(extraTtys).forEach(key => {
-        if (extraTtys[key] !== null) {
-            extraTtys[key].close();
+    // Opt-in diagnostics for the Windows "window closed but process stays alive"
+    // issue: EDEX_DEBUG_QUIT=1 dumps what still holds the event loop.
+    if (process.env.EDEX_DEBUG_QUIT) {
+        try {
+            const handles = process._getActiveHandles ? process._getActiveHandles() : [];
+            const summary = handles.map(h => (h && h.constructor && h.constructor.name) || typeof h);
+            signale.info("Active handles at quit: " + JSON.stringify(summary));
+        } catch (e) {
+            signale.warn("Could not inspect active handles: " + e.message);
         }
-    });
+    }
+    // Guarded: quitting before `ready` finished (shell resolution failure, bad
+    // cwd, ...) leaves `tty`/`extraTtys` undefined, which used to turn shutdown
+    // into a second, unrelated crash.
+    try {
+        if (tty) tty.close();
+    } catch (e) {
+        signale.warn(`Error while closing main TTY: ${e && e.message ? e.message : e}`);
+    }
+    if (extraTtys) {
+        Object.keys(extraTtys).forEach(key => {
+            try {
+                if (extraTtys[key] !== null) {
+                    extraTtys[key].close();
+                }
+            } catch (e) {
+                signale.warn(`Error while closing TTY ${key}: ${e && e.message ? e.message : e}`);
+            }
+        });
+    }
     signale.complete("Shutting down...");
 });
+

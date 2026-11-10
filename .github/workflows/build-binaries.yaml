@@ -63,7 +63,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-electron-
 
-      # prebuild-windows 内部使用 mkdir，目录已存在会失败；先清掉可能残留的目录
+      # 清掉可能残留的产物（pack 脚本本身也会清理 prebuild-src，这里额外清 dist）
       - name: Clean previous build output
         shell: pwsh
         run: Remove-Item -Recurse -Force prebuild-src, dist -ErrorAction SilentlyContinue
@@ -73,8 +73,9 @@ jobs:
         run: npm install
 
       # 顺序固定不可颠倒：复制 src/（排除 node_modules）→ prebuild-minify.js → prebuild-src 内 npm install
+      # （pack-* 由 prebuild.js 实现，跨平台且幂等，会自动清理旧的 prebuild-src）
       - name: Run prebuild script
-        run: npm run prebuild-windows
+        run: npm run pack-windows
 
       # npm run build-windows === electron-builder build -w --x64 --publish never
       # 注意：绝不要在同一次调用里加上 --ia32，否则 electron-builder 的
@@ -129,10 +130,10 @@ jobs:
       - name: Install build dependencies
         run: npm install
 
-      # prebuild-linux 使用 rsync（ubuntu-latest 自带）；node-pty 1.1.0 在 Linux 没有
+      # node-pty 1.1.0 在 Linux 没有
       # 预编译产物，会由 node-gyp 现场编译，依赖 python3 / make / g++（runner 均自带）。
       - name: Run prebuild script
-        run: npm run prebuild-linux
+        run: npm run pack-linux
 
       # 只构建 x64。仓库的 npm run build-linux 会同时构建 ia32/arm64/armv7l，
       # 需要 multilib 与 QEMU，复杂且易失败，这里直接用 electron-builder 构建 x64。
@@ -186,7 +187,7 @@ jobs:
         run: npm install
 
       - name: Run prebuild script
-        run: npm run prebuild-darwin
+        run: npm run pack-darwin
 
       # 仓库的 npm run build-darwin 没带 --publish never，这里直接调 CLI 补上，
       # 避免 electron-builder 在 tag 上尝试发布。同时关闭证书自动发现以免签名失败。
@@ -252,3 +253,4 @@ jobs:
           draft: false
           # 形如 v2.3.0-beta.1 的标签自动标记为预发布
           prerelease: ${{ contains(github.ref_name, '-') }}
+

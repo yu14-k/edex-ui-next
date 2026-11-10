@@ -48,3 +48,9 @@ src/node_modules
 
 # Local development notes / internal audit reports (not published)
 .dev-notes
+
+# Local tooling state (DSH harness rollback/session records) — never commit
+.dsh
+
+# Generated browser bundles (npm run vendor)
+src/assets/vendor/pdfjs

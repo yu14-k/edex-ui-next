@@ -1,6 +1,10 @@
 const cluster = require("cluster");
 
-if (cluster.isMaster) {
+// `cluster.isMaster` / `cluster.setupMaster` are deprecated aliases; prefer the
+// modern primary names and fall back for older runtimes.
+const isPrimary = (typeof cluster.isPrimary === "boolean") ? cluster.isPrimary : cluster.isMaster;
+
+if (isPrimary) {
     const electron = require("electron");
     const ipc = electron.ipcMain;
     const signale = require("signale");
@@ -12,7 +16,8 @@ if (cluster.isMaster) {
 
     const si = require("systeminformation");
 
-    cluster.setupMaster({
+    const setupPrimary = cluster.setupPrimary || cluster.setupMaster;
+    setupPrimary.call(cluster, {
         exec: require("path").join(__dirname, "_multithread.js")
     });
 
@@ -21,7 +26,8 @@ if (cluster.isMaster) {
     // Stop respawning workers once the app starts quitting (forking during
     // teardown races the shutdown). We intentionally do NOT force-disconnect
     // workers here: cluster/Node tears them down itself, and forcing it while
-    // IPC is in flight can corrupt the shutdown.
+    // IPC is in flight can corrupt the shutdown (measured: no effect on the
+    // pre-existing Windows teardown hang either way).
     electron.app.on("before-quit", () => { shuttingDown = true; });
     electron.app.on("will-quit", () => { shuttingDown = true; });
     process.on("exit", () => { shuttingDown = true; });
@@ -138,7 +144,7 @@ if (cluster.isMaster) {
             signale.warn(`Could not respawn multithread worker: ${e && e.message ? e.message : e}`);
         }
     });
-} else if (cluster.isWorker) {
+} else {
     const signale = require("signale");
     const si = require("systeminformation");
 
