@@ -55,6 +55,11 @@ jobs:
       - name: Install root dependencies
         run: npm install
 
+      # Electron 42+ 不再在 postinstall 下载二进制，改为首次运行 bin 时按需拉取；
+      # 显式跑 install.js 才能拿到 node_modules/electron/dist。
+      - name: Install Electron binary
+        run: node node_modules/electron/install.js
+
       - name: Install app dependencies
         run: npm --prefix src install
 
