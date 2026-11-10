@@ -30,7 +30,8 @@
     "vendor": "node vendor.js",
     "test:probe": "node lib/probe.js",
     "test:all": "npm test && npm run test:probe",
-    "prestart": "node vendor.js"
+    "prestart": "node vendor.js",
+    "release": "node lib/release.js"
   },
   "repository": {
     "type": "git",

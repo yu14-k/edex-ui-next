@@ -190,7 +190,38 @@ env:
 
 ---
 
-## 7. 本地复现 CI 构建
+## 6.5 自动化发布（推荐流程）
+
+现在有两条自动化路径，**都不需要手工拼 Release**：
+
+### A. 合并进 main 即自动发布（最省事）
+
+1. 改 `package.json` 与 `src/package.json` 的 `version`（两者必须一致，`npm test` 会检查）；
+2. 提交并合并/推送到 `main`；
+3. `build-binaries.yaml` 会构建 Windows + Linux，`release` job 检查 `v<version>` 是否已发布：
+   - 没发过 → **自动创建 `v<version>` 标签并发布 Release**（附 exe / AppImage / `SHA256SUMS.txt`）；
+   - 发过 → 打印 notice 直接跳过，不会重复发布。
+
+### B. 本地一条命令（想先本地验证构建时用）
+
+```bash
+npm run release -- 2.4.1              # 改版本号 + npm test + 提交 + 打 v2.4.1 标签
+npm run release -- 2.4.1 --build      # 额外在本机跑 pack + build-windows 验证打包链路
+npm run release -- 2.4.1 --push       # 提交、打标签并推分支与标签（触发 CI 发布）
+```
+
+脚本会先拒绝这些情况：工作区有未提交改动、目标版本与当前相同、标签已存在。
+打完标签推上去后，CI 的 `release` job 在构建成功后自动创建 Release。
+
+> 标签入口会校验**标签名与 package.json 版本一致**，写错直接 fail，避免发错版本。
+> Release 正文取自 `docs/RELEASE_NOTES.md`，所以发版前记得在该文件顶部补一段。
+
+### C. 手动触发（可选）
+
+`build-binaries.yaml` 支持 `workflow_dispatch`：可在 Actions 页面手动跑构建（不发布）；
+`probe.yml` 同样支持手动触发，用于跑运行时冒烟。
+
+---## 7. 本地复现 CI 构建
 
 ```bash
 # 根依赖（terser、clean-css、node-json-minify、esbuild、electron-builder）
