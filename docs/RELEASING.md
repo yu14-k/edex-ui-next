@@ -28,7 +28,7 @@
 1. `package.json` 与 `src/package.json` 两处 `version` 已改成新版本号，且两者一致。
    electron-builder 用 `package.json` 的 `version` 命名 Release 与更新元数据，
    标签与版本号不一致会让自动更新指向错误版本。
-2. 构建顺序相关文件未被破坏：`prebuild-src` 必须由 `npm run prebuild-windows` / `prebuild-linux`
+2. 构建顺序相关文件未被破坏：`prebuild-src` 必须由 `npm run pack-windows` / `pack-linux`
    生成（先复制 `src/` → 跑 `prebuild-minify.js` → 再 `npm install`），顺序不可颠倒。
 3. 待发布提交已推到远端默认分支。
 
@@ -164,11 +164,14 @@ dmg 未签名也未公证，首次打开需右键 → 打开，或执行
 
 ## 6. 架构选择与已知取舍
 
+> **2.4.0 起（Electron 45）**：上游已移除 **ia32** 与 **armv7l** 目标，本仓库同步删除
+> `build-windows-ia32` 脚本，`build-linux` 收敛为 `--x64 --arm64`。再提 32 位/armv7l 会直接构建失败。
+
 - **Windows**：默认只构建 **x64**。不要在同一次 electron-builder 调用里同时构建 x64 与 ia32，
   否则 `verifyInstallerSize` 会把两个架构的载荷求和后与单包大小比较而误报失败。
-  需要 32 位时单独执行 `npm run build-windows-ia32`（并为其单独上传 artifact）。
-- **Linux**：默认只构建 **x64 AppImage**。仓库的 `npm run build-linux` 会同时构建
-  ia32/arm64/armv7l，需要 multilib 与 QEMU，成本高且容易失败，工作流改为直接调用
+  32 位目标已被 Electron 移除，不再提供。
+- **Linux**：默认只构建 **x64 AppImage**。`npm run build-linux` 现在只构建 x64 与 arm64，
+  arm64 仍需 multilib 与 QEMU 支持，CI 里改为直接调用
   `electron-builder build -l --x64 --publish never`。
   需要 arm64 时建议新增独立 job，先安装 `docker/setup-qemu-action@v3`（`platforms: arm64`），
   再在 arm64 容器里构建，避免污染 x64 job。
@@ -187,27 +190,78 @@ env:
 
 ---
 
-## 7. 本地复现 CI 构建
+## 6.5 自动化发布（推荐流程）
+
+现在有两条自动化路径，**都不需要手工拼 Release**：
+
+### A. 合并进 main 即自动发布（最省事）
+
+1. 改 `package.json` 与 `src/package.json` 的 `version`（两者必须一致，`npm test` 会检查）；
+2. 提交并合并/推送到 `main`；
+3. `build-binaries.yaml` 会构建 Windows + Linux，`release` job 检查 `v<version>` 是否已发布：
+   - 没发过 → **自动创建 `v<version>` 标签并发布 Release**（附 exe / AppImage / `SHA256SUMS.txt`）；
+   - 发过 → 打印 notice 直接跳过，不会重复发布。
+
+### B. 本地一条命令（想先本地验证构建时用）
 
 ```bash
-# 根依赖（terser、clean-css、node-json-minify、electron-builder）
+npm run release -- 2.4.1              # 改版本号 + npm test + 提交 + 打 v2.4.1 标签
+npm run release -- 2.4.1 --build      # 额外在本机跑 pack + build-windows 验证打包链路
+npm run release -- 2.4.1 --push       # 提交、打标签并推分支与标签（触发 CI 发布）
+```
+
+脚本会先拒绝这些情况：工作区有未提交改动、目标版本与当前相同、标签已存在。
+打完标签推上去后，CI 的 `release` job 在构建成功后自动创建 Release。
+
+> 标签入口会校验**标签名与 package.json 版本一致**，写错直接 fail，避免发错版本。
+> Release 正文取自 `docs/RELEASE_NOTES.md`，所以发版前记得在该文件顶部补一段。
+
+### C. 手动触发（可选）
+
+`build-binaries.yaml` 支持 `workflow_dispatch`：可在 Actions 页面手动跑构建（不发布）；
+`probe.yml` 同样支持手动触发，用于跑运行时冒烟。
+
+---## 7. 本地复现 CI 构建
+
+```bash
+# 根依赖（terser、clean-css、node-json-minify、esbuild、electron-builder）
 npm install
 
 # Windows（PowerShell / cmd）
-npm run prebuild-windows
+npm run pack-windows
 npm run build-windows
 
 # Linux（含 WSL）
-npm run prebuild-linux
+npm run pack-linux
 ./node_modules/.bin/electron-builder build -l --x64 --publish never
 ```
 
+### 测试（发布前必跑）
+
+```bash
+npm test              # 静态检查：src/ 全部 JS 语法、构建脚本、四份 manifest、版本一致性
+npm run vendor        # 生成 pdfjs 浏览器包（test 只提示，probe 必需）
+npm run test:probe    # 真机冒烟：启动应用并按探针断言 11 项
+npm run test:all      # 上面两步串起来
+```
+
+`test:probe` 驱动 `src/_probe.js`（`EDEX_PROBE=1`），断言：终端连通、文件浏览器渲染条目、
+磁盘用量条、快捷键数、9 个模块初始化、设置面板打开、新建终端标签、剪贴板读、剪贴板写、
+pdfjs 6 经 module worker 解析真实 PDF。Linux CI（`.github/workflows/probe.yml`）用
+`xvfb-run -a` 提供虚拟显示跑同一套断言。
+
+> 已知噪音：Windows 上关闭时偶发不退出（ConPTY 清理竞态，2.3.x 基线同样复现），
+> 探针把它记为 `WARN` 而不判失败；真正的功能回归才算失败。
+
 注意事项：
 
-- `prebuild-*` 脚本内部会 `cd prebuild-src` 并执行 `npm install`，这是**必需**的一步，
+- `pack-*` 脚本内部会 `cd prebuild-src` 并执行 `npm install`，这是**必需**的一步，
   `dist/` 与 `prebuild-src/` 均已在 `.gitignore` 中，不会被提交。
-- 本地重复构建前先删掉 `prebuild-src` 与 `dist`（Windows 上 `prebuild-windows` 用 `mkdir`，目录已存在会报错；
-  workflow 里已加入清理步骤）。
+- `npm run pack` 现在由 `prebuild.js` 实现（跨平台，Windows/Linux/macOS 同一套命令）：
+  它会先删除旧的 `prebuild-src`、复制 `src/`（排除 `node_modules`）、再压缩。
+  旧的 `prebuild-windows` / `prebuild-linux` 名称已废弃——**不要再使用**，因为 npm 会把
+  `prebuild-*` 当作 `build-*` 的 pre-hook，导致 `npm run build-windows` 时重复预构建。
+- 本地重复构建前建议先删掉 `dist`（`prebuild-src` 由 `pack` 自动清理，幂等）。
 - Linux 上 `node-pty@1.1.0` 没有预编译包，需要现场用 node-gyp 编译，
   依赖 `python3`、`make`、`g++`（`ubuntu-latest` 已自带）。
 - 仓库使用 git submodule 管理 `file-icons/*`，其中 `bytesize-icons` 是 SSH 地址。

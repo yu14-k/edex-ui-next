@@ -1,0 +1,95 @@
+# 运行时冒烟测试（runtime probe）
+#
+# 与 build-binaries.yaml 分开：那个工作流只负责出安装包，这个只负责「能不能跑起来」。
+# 判据来自应用内置的探针（src/_probe.js，EDEX_PROBE=1），由 lib/probe.js 驱动并断言：
+#   终端连通、文件浏览器渲染、磁盘条、快捷键、模块初始化、设置面板、新建标签、
+#   剪贴板读（paste）、剪贴板写（copy）、pdfjs 6 通过 module worker 解析真实 PDF。
+#
+# 注：本工作流在 Linux 上以 xvfb 提供虚拟显示；首次引入，尚未在真实 runner 上验证过。
+
+name: Runtime probe
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: probe-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe-linux:
+    name: Linux x64 smoke test (xvfb)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            src/package-lock.json
+
+      # Electron 42+ 不再 postinstall 下载二进制，改为首次运行按需拉取；
+      # 缓存 dist 目录可以避免每次 CI 都重新下载 ~100 MB。
+      - name: Cache Electron binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/electron
+            node_modules/electron/dist
+          key: ${{ runner.os }}-electron-${{ hashFiles('package-lock.json', 'src/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
+
+      - name: Install root dependencies
+        run: npm install
+
+      # Electron 42+ 不再在 postinstall 下载二进制，改为首次运行 bin 时按需拉取；
+      # 显式跑 install.js 才能拿到 node_modules/electron/dist。
+      - name: Install Electron binary
+        run: node node_modules/electron/install.js
+
+      - name: Install app dependencies
+        run: npm --prefix src install
+
+      # GitHub runner 上 electron 的 chrome-sandbox 不是 root:root 4755，
+      # Chromium 会直接 FATAL 退出；改成正确权限比 --no-sandbox 更接近真实运行环境。
+      - name: Fix chrome-sandbox permissions
+        run: |
+          sudo chown root:root node_modules/electron/dist/chrome-sandbox
+          sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
+
+      # node-pty 1.1.0 走 N-API，通常无需针对 Electron 重编；失败不阻塞（由探针判定）
+      - name: Rebuild node-pty for Electron (best effort)
+        continue-on-error: true
+        working-directory: src
+        run: ../node_modules/.bin/electron-rebuild -f -w node-pty
+
+      - name: Vendor browser bundles (pdfjs)
+        run: npm run vendor
+
+      - name: Static checks
+        run: npm test
+
+      - name: Runtime probe under xvfb
+        run: xvfb-run -a node lib/probe.js --log probe.log --timeout 120
+
+      - name: Upload probe log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-log
+          path: |
+            probe.log
+          if-no-files-found: ignore

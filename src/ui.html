@@ -9,7 +9,7 @@
 
         <!-- Load dependency css -->
         <link rel="stylesheet" href="node_modules/augmented-ui/augmented.css" />
-        <link rel="stylesheet" href="node_modules/xterm/css/xterm.css" />
+        <link rel="stylesheet" href="node_modules/@xterm/xterm/css/xterm.css" />
         <!-- Load main css -->
         <link rel="stylesheet" href="assets/css/main.css" />
         <link rel="stylesheet" href="assets/css/modal.css" />
@@ -36,13 +36,15 @@
         <link rel="stylesheet" href="assets/css/extra_ratios.css" />
 
         <!-- Load dependency js (browser/UMD builds; renderer is sandboxed, no require) -->
-        <script src="node_modules/pdfjs-dist/build/pdf.js"></script>
+        <!-- pdfjs 6 is ESM-only and Chromium blocks module scripts on file://,
+             so it is bundled to a classic script by `npm run vendor` (vendor.js) -->
+        <script src="assets/vendor/pdfjs/pdf.bundle.js"></script>
         <script src="node_modules/smoothie/smoothie.js"></script>
         <script src="node_modules/howler/dist/howler.js"></script>
-        <script src="node_modules/xterm/lib/xterm.js"></script>
-        <script src="node_modules/xterm-addon-attach/lib/xterm-addon-attach.js"></script>
-        <script src="node_modules/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
-        <script src="node_modules/xterm-addon-webgl/lib/xterm-addon-webgl.js"></script>
+        <script src="node_modules/@xterm/xterm/lib/xterm.js"></script>
+        <script src="node_modules/@xterm/addon-attach/lib/addon-attach.js"></script>
+        <script src="node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+        <script src="node_modules/@xterm/addon-webgl/lib/addon-webgl.js"></script>
         <script src="assets/vendor/encom-globe.js"></script>
         <!-- Provide a writable `module` global for the legacy CommonJS-shaped class files -->
         <script src="bridge-shim.js"></script>

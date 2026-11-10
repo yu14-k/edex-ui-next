@@ -37,6 +37,32 @@ window._delay = ms => {
     });
 };
 
+// Robust JSON config reader: a corrupted/half-written config file must not brick
+// startup. On parse failure the broken file is preserved as "<file>.bak" and the
+// caller's default is written back so the next launch is healthy again.
+window._readJsonConfig = (file, fallback) => {
+    let raw = null;
+    try {
+        if (fs.existsSync(file)) {
+            raw = fs.readFileSync(file, {encoding: "utf-8"});
+            return JSON.parse(raw);
+        }
+    } catch (e) {
+        console.warn(`Invalid config file ${file}, restoring defaults:`, e && e.message ? e.message : e);
+        try {
+            if (typeof raw === "string") fs.writeFileSync(file + ".bak", raw, "utf-8");
+        } catch (err) {
+            // best effort only
+        }
+    }
+    try {
+        fs.writeFileSync(file, JSON.stringify(fallback, "", 4), "utf-8");
+    } catch (e) {
+        console.warn(`Could not write default config ${file}:`, e && e.message ? e.message : e);
+    }
+    return fallback;
+};
+
 // Initiate basic error handling
 window.onerror = (msg, path, line, col, error) => {
     try {
@@ -49,7 +75,11 @@ window.onerror = (msg, path, line, col, error) => {
 };
 window.addEventListener("unhandledrejection", ev => {
     try {
-        if (window.__edex) window.__edex.ipc.send("log", "error", `[renderer] unhandledrejection: ${ev && ev.reason}`);
+        if (window.__edex) {
+            const reason = ev && ev.reason;
+            const detail = (reason && reason.stack) ? reason.stack : reason;
+            window.__edex.ipc.send("log", "error", `[renderer] unhandledrejection: ${detail}`);
+        }
     } catch (e) {}
 });
 
@@ -73,10 +103,61 @@ async function initPaths() {
     shortcutsFile = path.join(settingsDir, "shortcuts.json");
     lastWindowStateFile = path.join(settingsDir, "lastWindowState.json");
 
-    // Load config
-    window.settings = JSON.parse(fs.readFileSync(settingsFile, "utf-8"));
-    window.shortcuts = JSON.parse(fs.readFileSync(shortcutsFile, "utf-8"));
-    window.lastWindowState = JSON.parse(fs.readFileSync(lastWindowStateFile, "utf-8"));
+    // Load config (tolerant: a corrupted file falls back to defaults instead of
+    // aborting the whole UI boot). The defaults come from the main process so
+    // there is exactly one definition of them.
+    const cfgDefaults = await services.config.defaults().catch(e => {
+        console.warn("Could not fetch default config from main:", e && e.message ? e.message : e);
+        return null;
+    });
+    const FALLBACK_SETTINGS = {
+        shell: (process.platform === "win32") ? "powershell.exe" : "bash",
+        shellArgs: '',
+        cwd: settingsDir,
+        keyboard: "en-US",
+        theme: "tron",
+        termFontSize: 15,
+        audio: true,
+        audioVolume: 1.0,
+        disableFeedbackAudio: false,
+        clockHours: 24,
+        pingAddr: "1.1.1.1",
+        port: 3000,
+        nointro: false,
+        nocursor: false,
+        forceFullscreen: true,
+        allowWindowed: false,
+        excludeThreadsFromToplist: true,
+        hideDotfiles: false,
+        fsListView: false,
+        experimentalGlobeFeatures: false,
+        experimentalFeatures: false
+    };
+    window.settings = window._readJsonConfig(settingsFile, (cfgDefaults && cfgDefaults.settings) || FALLBACK_SETTINGS);
+    window.shortcuts = window._readJsonConfig(shortcutsFile, (cfgDefaults && cfgDefaults.shortcuts) || []);
+
+    // Merge shortcuts added by newer versions into an existing user config, so
+    // upgrades pick up new actions (e.g. SCREENSHOT) without deleting the file.
+    if (cfgDefaults && Array.isArray(cfgDefaults.shortcuts) && Array.isArray(window.shortcuts)) {
+        const known = new Set(window.shortcuts.map(s => s && s.action));
+        let added = 0;
+        cfgDefaults.shortcuts.forEach(def => {
+            if (!known.has(def.action)) {
+                window.shortcuts.push(def);
+                added++;
+            }
+        });
+        if (added > 0) {
+            try {
+                fs.writeFileSync(shortcutsFile, JSON.stringify(window.shortcuts, "", 4), "utf-8");
+                console.log(`Added ${added} new default shortcut(s) to shortcuts.json`);
+            } catch (e) {
+                console.warn("Could not persist new shortcuts:", e && e.message ? e.message : e);
+            }
+        }
+    }
+    window.lastWindowState = window._readJsonConfig(lastWindowStateFile,
+        (cfgDefaults && cfgDefaults.lastWindowState) || { useFullscreen: true });
 
     // Load CLI parameters
     let argv = await services.app.getArgv();
@@ -89,7 +170,21 @@ async function initPaths() {
             window.settings.theme = theme;
             window.settings.nointroOverride = true;
         }
-        _loadTheme(JSON.parse(fs.readFileSync(path.join(themesDir, window.settings.theme + ".json"), "utf-8")));
+        // A broken/unknown theme must not abort the boot: fall back to the
+        // built-in default before giving up.
+        const themeNames = [window.settings.theme, "tron", "apollo"];
+        let loaded = false;
+        for (const name of themeNames) {
+            try {
+                _loadTheme(JSON.parse(fs.readFileSync(path.join(themesDir, name + ".json"), "utf-8")));
+                window.settings.theme = name;
+                loaded = true;
+                break;
+            } catch (e) {
+                console.warn(`Theme "${name}" could not be loaded:`, e && e.message ? e.message : e);
+            }
+        }
+        if (!loaded) console.error("No usable theme found, keeping current styles.");
     });
     ipc.send("getThemeOverride");
     // Same for keyboard override/hotswitch
@@ -955,7 +1050,8 @@ window.openShortcutsHelp = () => {
         "FS_DOTFILES": "Toggle hidden files and directories in the file browser.",
         "KB_PASSMODE": "Toggle the on-screen keyboard's \"Password Mode\", which allows you to safely<br>type sensitive information even if your screen might be recorded (disable visual input feedback).",
         "DEV_DEBUG": "Open Chromium Dev Tools, for debugging purposes.",
-        "DEV_RELOAD": "Trigger front-end hot reload."
+        "DEV_RELOAD": "Trigger front-end hot reload.",
+        "SCREENSHOT": "Save a PNG screenshot of the interface (saved under your Pictures folder)."
     };
 
     let appList = "";
@@ -1106,6 +1202,23 @@ window.useAppShortcut = action => {
         case "DEV_RELOAD":
             window.location.reload(true);
             return true;
+        case "SCREENSHOT":
+            // Built-in capture: OS snipping tools can show a black surface over a
+            // fullscreen GPU-composited window, so the app can screenshot itself.
+            services.app.screenshot().then(file => {
+                new Modal({
+                    type: "info",
+                    title: "Screenshot saved",
+                    message: `<p>Saved to:</p><p><code>${window._escapeHtml(file)}</code></p>`
+                });
+            }).catch(e => {
+                new Modal({
+                    type: "error",
+                    title: "Screenshot failed",
+                    message: window._escapeHtml(e && e.message ? e.message : String(e))
+                });
+            });
+            return true;
         default:
             console.warn(`Unknown "${action}" app shortcut action`);
             return false;
@@ -1167,9 +1280,8 @@ window.addEventListener("blur", () => {
 
 // Prevent showing menu, exiting fullscreen or app with keyboard shortcuts
 document.addEventListener("keydown", e => {
-    if (e.key === "Alt") {
-        e.preventDefault();
-    }
+    // NOTE: Alt alone is deliberately NOT swallowed any more — blocking it also
+    // broke OS-level combos such as Alt+PrtScn and some screenshot tools.
     if (e.code.startsWith("Alt") && e.ctrlKey && e.shiftKey) {
         e.preventDefault();
     }

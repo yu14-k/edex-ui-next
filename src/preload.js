@@ -10,7 +10,9 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const { nanoid } = require("nanoid/non-secure");
-const prettyBytes = require("pretty-bytes");
+// `pretty-bytes` 7 and `color` 5 are ESM-only. Node 24's `require(esm)` returns
+// the module namespace, so the callable sits on `.default`.
+const prettyBytes = require("pretty-bytes").default;
 const mime = require("mime-types");
 // file-icons matcher ships as a CommonJS module; expose it as a pure function
 let matchIcon = null;
@@ -20,9 +22,9 @@ try {
     matchIcon = () => "";
 }
 
-// color is CJS; all color math happens here (in the preload context where the
-// chained API works) and only resulting strings cross the bridge.
-const color = require("color");
+// All color math happens here (in the preload context where the chained API
+// works) and only resulting strings cross the bridge.
+const color = require("color").default;
 
 function colorify(base, target, colorFilter) {
     let newColor = color(base);
@@ -60,49 +62,43 @@ const ipc = {
     invoke: (channel, ...args) => ipcRenderer.invoke(channel, ...args)
 };
 
-// --- fs subset (safe, explicitly enumerated) ---
+// --- fs subset (only what the renderer actually uses) ---
+// NOTE: paths are intentionally not whitelisted here — the file browser and the
+// built-in text editor are user-driven features that must reach any path the
+// user picks. The surface is kept minimal instead.
+// `lstat`/`stat` are required: filesystem.class.js wraps them through the
+// `_asyncFSwrapper` indirection (`fs[method](...)`), which is easy to miss when
+// auditing direct `fs.stat(...)` call sites.
+const toPlainStats = (stats) => ({
+    // Prototype methods (isDirectory etc.) do not survive the contextBridge copy,
+    // so hand over a plain object with function properties.
+    isDirectory: () => stats.isDirectory(),
+    isFile: () => stats.isFile(),
+    isSymbolicLink: () => stats.isSymbolicLink(),
+    isBlockDevice: () => stats.isBlockDevice(),
+    isCharacterDevice: () => stats.isCharacterDevice(),
+    isFIFO: () => stats.isFIFO(),
+    isSocket: () => stats.isSocket(),
+    size: stats.size,
+    mtime: stats.mtime,
+    atime: stats.atime,
+    birthtime: stats.birthtime,
+    mode: stats.mode
+});
+
 const fsBridge = {
     readFileSync: (p, enc) => fs.readFileSync(p, enc),
     writeFileSync: (p, data, enc) => fs.writeFileSync(p, data, enc),
     existsSync: (p) => fs.existsSync(p),
-    mkdirSync: (p, opts) => fs.mkdirSync(p, opts),
     readdirSync: (p, opts) => fs.readdirSync(p, opts),
     readdir: (p, cb) => fs.readdir(p, cb),
     lstat: (p, cb) => fs.lstat(p, (err, stats) => {
         if (err) return cb(err);
-        // Convert to a plain object: prototype methods (isDirectory etc.) do
-        // not survive the contextBridge copy.
-        cb(null, {
-            isDirectory: () => stats.isDirectory(),
-            isFile: () => stats.isFile(),
-            isSymbolicLink: () => stats.isSymbolicLink(),
-            isBlockDevice: () => stats.isBlockDevice(),
-            isCharacterDevice: () => stats.isCharacterDevice(),
-            isFIFO: () => stats.isFIFO(),
-            isSocket: () => stats.isSocket(),
-            size: stats.size,
-            mtime: stats.mtime,
-            atime: stats.atime,
-            birthtime: stats.birthtime,
-            mode: stats.mode
-        });
+        cb(null, toPlainStats(stats));
     }),
     stat: (p, cb) => fs.stat(p, (err, stats) => {
         if (err) return cb(err);
-        cb(null, {
-            isDirectory: () => stats.isDirectory(),
-            isFile: () => stats.isFile(),
-            isSymbolicLink: () => stats.isSymbolicLink(),
-            isBlockDevice: () => stats.isBlockDevice(),
-            isCharacterDevice: () => stats.isCharacterDevice(),
-            isFIFO: () => stats.isFIFO(),
-            isSocket: () => stats.isSocket(),
-            size: stats.size,
-            mtime: stats.mtime,
-            atime: stats.atime,
-            birthtime: stats.birthtime,
-            mode: stats.mode
-        });
+        cb(null, toPlainStats(stats));
     }),
     readFile: (p, enc, cb) => {
         if (typeof enc === "function") { cb = enc; enc = undefined; }
@@ -115,8 +111,7 @@ const fsBridge = {
     watch: (dir, cb) => {
         const w = fs.watch(dir, cb);
         return { close: () => { try { w.close(); } catch (e) {} } };
-    },
-    statSync: (p) => fs.statSync(p)
+    }
 };
 
 // --- path / os subsets ---
@@ -157,7 +152,8 @@ const services = {
         getArgv: () => ipc.invoke("edex:app:getArgv"),
         relaunch: () => ipc.send("edex:app:relaunch"),
         quit: () => ipc.send("edex:app:quit"),
-        focus: () => ipc.send("edex:app:focus")
+        focus: () => ipc.send("edex:app:focus"),
+        screenshot: () => ipc.invoke("edex:app:screenshot")
     },
     screen: {
         getAllDisplays: () => ipc.invoke("edex:screen:getAllDisplays")
@@ -167,7 +163,8 @@ const services = {
         openExternal: (url) => ipc.invoke("edex:shell:openExternal", url)
     },
     clipboard: {
-        readText: () => ipc.invoke("edex:clipboard:readText")
+        readText: () => ipc.invoke("edex:clipboard:readText"),
+        writeText: (text) => ipc.invoke("edex:clipboard:writeText", text)
     },
     shortcut: {
         register: (trigger) => ipc.invoke("edex:shortcut:register", trigger),
@@ -187,6 +184,9 @@ const services = {
         onLeaveFullScreen: (cb) => ipc.on("edex:win:leave-full-screen", cb)
     },
     username: () => ipc.invoke("edex:username"),
+    config: {
+        defaults: () => ipc.invoke("edex:config:defaults")
+    },
     update: {
         check: () => ipc.invoke("edex:update:check")
     },

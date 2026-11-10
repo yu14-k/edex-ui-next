@@ -63,7 +63,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-electron-
 
-      # prebuild-windows 内部使用 mkdir，目录已存在会失败；先清掉可能残留的目录
+      # 清掉可能残留的产物（pack 脚本本身也会清理 prebuild-src，这里额外清 dist）
       - name: Clean previous build output
         shell: pwsh
         run: Remove-Item -Recurse -Force prebuild-src, dist -ErrorAction SilentlyContinue
@@ -73,8 +73,9 @@ jobs:
         run: npm install
 
       # 顺序固定不可颠倒：复制 src/（排除 node_modules）→ prebuild-minify.js → prebuild-src 内 npm install
+      # （pack-* 由 prebuild.js 实现，跨平台且幂等，会自动清理旧的 prebuild-src）
       - name: Run prebuild script
-        run: npm run prebuild-windows
+        run: npm run pack-windows
 
       # npm run build-windows === electron-builder build -w --x64 --publish never
       # 注意：绝不要在同一次调用里加上 --ia32，否则 electron-builder 的
@@ -129,10 +130,10 @@ jobs:
       - name: Install build dependencies
         run: npm install
 
-      # prebuild-linux 使用 rsync（ubuntu-latest 自带）；node-pty 1.1.0 在 Linux 没有
+      # node-pty 1.1.0 在 Linux 没有
       # 预编译产物，会由 node-gyp 现场编译，依赖 python3 / make / g++（runner 均自带）。
       - name: Run prebuild script
-        run: npm run prebuild-linux
+        run: npm run pack-linux
 
       # 只构建 x64。仓库的 npm run build-linux 会同时构建 ia32/arm64/armv7l，
       # 需要 multilib 与 QEMU，复杂且易失败，这里直接用 electron-builder 构建 x64。
@@ -186,7 +187,7 @@ jobs:
         run: npm install
 
       - name: Run prebuild script
-        run: npm run prebuild-darwin
+        run: npm run pack-darwin
 
       # 仓库的 npm run build-darwin 没带 --publish never，这里直接调 CLI 补上，
       # 避免 electron-builder 在 tag 上尝试发布。同时关闭证书自动发现以免签名失败。
@@ -202,20 +203,57 @@ jobs:
           path: dist/*.dmg
           if-no-files-found: error
 
-  # ------------------------------------------------------------ 仅 tag 才发布
+  # ------------------------------------------------------------ 发布（tag 或 main 版本号变更）
+  # 两条入口：
+  #   1) 推送 v* 标签 —— 立刻发布，并校验标签与 package.json 版本一致
+  #   2) 推送 main 且 package.json 版本还没发过 —— 自动打 v<version> 标签并发布
+  #      （即「改好版本号合并进 main 就自动出包」，不需要手动打 tag）
   release:
     name: Create GitHub Release
     needs: [build-windows, build-linux]
-    if: startsWith(github.ref, 'refs/tags/')
+    if: |
+      startsWith(github.ref, 'refs/tags/') ||
+      (github.ref == 'refs/heads/main' && needs.build-windows.result == 'success' && needs.build-linux.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: write   # 创建 Release 并上传附件所需
+      contents: write   # 创建 tag / Release 并上传附件所需
     steps:
       - name: Checkout (release notes template)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version from package.json
+        id: ver
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      # tag 入口：标签必须与 package.json 版本一致，避免发错版本
+      - name: Verify tag matches package.json (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          expected="v${{ steps.ver.outputs.version }}"
+          if [ "$expected" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match package.json version ${expected}"
+            exit 1
+          fi
+
+      # main 入口：版本号没变（或已发过）就跳过发布，不用手动干预
+      - name: Skip when this version is already released (main builds only)
+        id: gate
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "v${{ steps.ver.outputs.version }}" >/dev/null 2>&1; then
+            echo "::notice::v${{ steps.ver.outputs.version }} 已发布，跳过"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Download all build artifacts
+        if: startsWith(github.ref, 'refs/tags/') || steps.gate.outputs.publish == 'true'
         uses: actions/download-artifact@v4
         with:
           path: release-assets
@@ -223,6 +261,7 @@ jobs:
 
       # 因为二进制未签名，发布时附上 SHA256 供用户校验下载完整性
       - name: Generate SHA256 checksums
+        if: startsWith(github.ref, 'refs/tags/') || steps.gate.outputs.publish == 'true'
         run: |
           cd release-assets
           : > SHA256SUMS.txt
@@ -233,11 +272,16 @@ jobs:
           cat SHA256SUMS.txt
 
       - name: List assets to be released
+        if: startsWith(github.ref, 'refs/tags/') || steps.gate.outputs.publish == 'true'
         run: ls -lh release-assets
 
       - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/') || steps.gate.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
+          # tag 入口沿用推送的标签；main 入口自动创建 v<version> 标签
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', steps.ver.outputs.version) }}
+          name: eDEX-UI ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', steps.ver.outputs.version) }}
           files: |
             release-assets/*.exe
             release-assets/*.exe.blockmap
@@ -251,4 +295,5 @@ jobs:
           fail_on_unmatched_files: false
           draft: false
           # 形如 v2.3.0-beta.1 的标签自动标记为预发布
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(github.ref_name, '-') || contains(steps.ver.outputs.version, '-') }}
+

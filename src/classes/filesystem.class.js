@@ -173,8 +173,22 @@ class FilesystemDisplay {
 
             if (process.platform === "win32" && dir.endsWith(":")) dir = dir+"\\";
             let tcwd = dir;
-            let content = await this._asyncFSwrapper.readdir(tcwd).catch(err => {
-                console.warn(err);
+
+            // The default cwd is userData, which Electron itself keeps writing to
+            // (Cache/GPUCache/Local Storage...). A readdir racing with that churn
+            // can fail transiently; retry briefly before declaring the panel failed.
+            let content;
+            let readError;
+            for (let attempt = 0; attempt < 3 && typeof content === "undefined"; attempt++) {
+                if (attempt > 0) await new Promise(resolve => setTimeout(resolve, 300));
+                content = await this._asyncFSwrapper.readdir(tcwd).catch(err => {
+                    readError = err;
+                    return undefined;
+                });
+            }
+
+            if (typeof content === "undefined") {
+                console.warn("Could not read directory:", readError && readError.message ? readError.message : readError);
                 if (this._noTracking === true && this.dirpath) { // #262
                     this.setFailedState();
                     setTimeout(() => {
@@ -183,7 +197,9 @@ class FilesystemDisplay {
                 } else {
                     this.setFailedState();
                 }
-            });
+                this._reading = false;
+                return false;
+            }
 
             this.reCalculateDiskUsage(tcwd);
 
@@ -428,12 +444,13 @@ class FilesystemDisplay {
             });
 
             // Update space bar behavior (replaced string onclick, see #S1.2)
+            // The bar is absent in the failed state (container replaced), so guard it.
             const spaceBar = document.getElementById("fs_space_bar");
-            if (spaceBar._renderListener) {
+            if (spaceBar && spaceBar._renderListener) {
                 spaceBar.removeEventListener("click", spaceBar._renderListener);
                 spaceBar._renderListener = null;
             }
-            if (this.filesContainer.classList.contains("disks")) {
+            if (spaceBar && this.filesContainer.classList.contains("disks")) {
                 spaceBar._renderListener = () => { this.render(this.cwd); };
                 spaceBar.addEventListener("click", spaceBar._renderListener);
             }
@@ -564,7 +581,13 @@ class FilesystemDisplay {
         };
 
         this.renderDiskUsage = async fsBlock => {
-            if (document.getElementById("fs_space_bar").getAttribute("onclick") !== "" || fsBlock === null) return;
+            // The space bar only exists while the filesystem panel is mounted; in
+            // the failed/detached state the node is gone (this used to throw
+            // "Cannot read properties of null (reading 'getAttribute')").
+            // The old `onclick` attribute check is obsolete: the click handler is
+            // attached with addEventListener (#S1.2), so the attribute is always
+            // absent and the check always short-circuited the rendering.
+            if (!document.getElementById("fs_space_bar") || fsBlock === null) return;
 
             let splitter = (process.platform === "win32") ? "\\" : "/";
             let displayMount = (fsBlock.mount.length < 18) ? fsBlock.mount : "..."+splitter+fsBlock.mount.split(splitter).pop();
@@ -591,7 +614,17 @@ class FilesystemDisplay {
         // ...except if we're hot-reloading, in which case this can mess up the rendering
         // See #392
         if (window.performance.navigation.type === 0) {
-            this.readFS(window.term[window.currentTerm].cwd || window.settings.cwd);
+            // On platforms without TTY cwd tracking (Windows) the terminal reports a
+            // display label ("FALLBACK |-- <path>") — strip it, otherwise readdir gets
+            // a bogus path and the whole panel drops into its failed state.
+            const term = window.term[window.currentTerm];
+            let startCwd = (term && term.cwd) || window.settings.cwd;
+            if (typeof startCwd === "string" && startCwd.startsWith("FALLBACK |-- ")) {
+                startCwd = startCwd.slice(13);
+                this.cwd_path = startCwd;
+                this._noTracking = true;
+            }
+            this.readFS(startCwd);
         }
 
         this.openFile = (name, path, type) => { //Might add text formatting at some point, not now though - Surge

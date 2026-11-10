@@ -17,8 +17,11 @@ class NetService {
         try {
             const geolite2 = require("geolite2-redist");
             const maxmind = require("maxmind");
-            geolite2.downloadDbs(path.join(app.getPath("userData"), "geoIPcache")).then(() => {
-                return geolite2.open("GeoLite2-City", p => maxmind.open(p));
+            // geolite2-redist 4 takes an options object (path/dbList) instead of a
+            // bare directory string, and `open()` accepts the download dir as 3rd arg.
+            const geoDir = path.join(app.getPath("userData"), "geoIPcache");
+            geolite2.downloadDbs({ path: geoDir, dbList: ["GeoLite2-City"] }).then(() => {
+                return geolite2.open("GeoLite2-City", p => maxmind.open(p), geoDir);
             }).then(lookup => {
                 this._geoLookup = lookup;
                 this._geoReady = true;

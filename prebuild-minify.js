@@ -22,6 +22,9 @@ function writeMinified(path, data) {
 }
 
 async function recursiveMinify(dirPath) {
+    // Never descend into installed dependencies: they are third-party, already
+    // minified where it matters, and some of them use syntax terser cannot parse.
+    if (path.basename(dirPath) === "node_modules") return;
     try { var files = fs.readdirSync(dirPath); }
     catch(e) { return; }
     if (files.length > 0) {
@@ -36,6 +39,9 @@ async function recursiveMinify(dirPath) {
                 if (filePath.endsWith(".json") && !filePath.endsWith("icons.json")) continue;
                 // See #446
                 if (filePath.endsWith("file-icons-match.js")) continue;
+                // Vendor bundles are produced by vendor.js already; re-minifying
+                // ~1 MB of pdfjs on every build is pure build-time cost.
+                if (filePath.indexOf(path.join("assets", "vendor", "pdfjs")) !== -1) continue;
                 await stdout.write(filePath.slice(filePath.indexOf('prebuild-src/')+13)+'...');
 
                 switch (filePath.split(".").pop()) {
@@ -93,4 +99,16 @@ async function recursiveMinify(dirPath) {
     }
 }
 
-recursiveMinify(path.join(__dirname, "prebuild-src"));
+// Exported so prebuild.js can await the whole minification pass instead of
+// relying on the module-level side effect (which could let the process exit
+// before the last write finished).
+module.exports = function minifyDirectory(dirPath) {
+    return recursiveMinify(dirPath);
+};
+
+if (require.main === module) {
+    recursiveMinify(path.join(__dirname, "prebuild-src")).catch(e => {
+        console.error(e);
+        process.exit(1);
+    });
+}

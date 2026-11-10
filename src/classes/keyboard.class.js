@@ -44,7 +44,16 @@ class Keyboard {
             });
 
             let cat = mods.join("");
-            
+
+            // Shortcuts without a modifier land in an empty category that the
+            // on-screen keyboard does not have; skipping them must never break
+            // the whole UI (a single bad shortcuts.json entry used to do exactly
+            // that, unrecoverably).
+            if (!Object.prototype.hasOwnProperty.call(this._shortcuts, cat)) {
+                console.warn(`Keyboard: ignoring shortcut "${scut.trigger}" (${scut.action}) — unsupported modifier combination`);
+                return;
+            }
+
             if (cut.type === "app" && cut.action === "TAB_X" && cut.trigger === "X") {
                 for (let i = 1; i <= 5; i++) {
                     let ncut = Object.assign({}, cut);

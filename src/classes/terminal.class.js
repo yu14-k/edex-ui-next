@@ -85,14 +85,17 @@ class Terminal {
 
             let themeColor = `rgb(${window.theme.r}, ${window.theme.g}, ${window.theme.b})`;
 
+            const termFontFamily = window.theme.terminal.fontFamily || "Fira Mono";
+            const termFontSize = window.theme.terminal.fontSize || window.settings.termFontSize || 15;
+
             this.term = new this.xTerm({
                 cols: 80,
                 rows: 24,
                 cursorBlink: window.theme.terminal.cursorBlink || true,
                 cursorStyle: window.theme.terminal.cursorStyle || "block",
                 allowTransparency: window.theme.terminal.allowTransparency || false,
-                fontFamily: window.theme.terminal.fontFamily || "Fira Mono",
-                fontSize: window.theme.terminal.fontSize || window.settings.termFontSize || 15,
+                fontFamily: termFontFamily,
+                fontSize: termFontSize,
                 fontWeight: window.theme.terminal.fontWeight || "normal",
                 fontWeightBold: window.theme.terminal.fontWeightBold || "bold",
                 letterSpacing: window.theme.terminal.letterSpacing || 0,
@@ -126,12 +129,37 @@ class Terminal {
             let fitAddon = new FitAddon();
             this.term.loadAddon(fitAddon);
             this.term.open(document.getElementById(opts.parentId));
-            // WebGL renderer is optional: fall back to the canvas renderer if
-            // WebGL is unavailable (headless, software rendering, old GPUs).
+            // WebGL renderer is optional. It is NOT harmless when it half-fails:
+            // the addon rounds the character cell to device pixels and, if its
+            // renderer never activates, the core keeps that (narrower) cell size —
+            // text then renders visibly smaller/cramped than the configured size.
+            // So: load it, then verify the resulting cell against an independent
+            // canvas measurement, and fall back to the canvas renderer on mismatch.
+            let webglAddon = null;
             try {
-                this.term.loadAddon(new WebglAddon());
+                webglAddon = new WebglAddon();
+                this.term.loadAddon(webglAddon);
+                // The WebGL renderer rounds the character cell down to whole device
+                // pixels. On fractional-DPI displays (150%/125% scaling) that makes
+                // the cell ~3-4% narrower than the font's natural advance, so glyphs
+                // are drawn at the configured size but squeezed into narrower cells —
+                // text looks smaller/cramped. Accept the addon only when its metrics
+                // match the font; otherwise fall back to the (exact) canvas renderer.
+                const cellWidth = this.term._core._renderService.dimensions.css.cell.width;
+                const probeCtx = document.createElement("canvas").getContext("2d");
+                probeCtx.font = `${termFontSize}px "${termFontFamily}"`;
+                const expectedWidth = probeCtx.measureText("W".repeat(32)).width / 32;
+                if (!(cellWidth > 0) || Math.abs(cellWidth - expectedWidth) > expectedWidth * 0.01) {
+                    throw new Error(`cell ${Number(cellWidth).toFixed(3)} != font advance ${expectedWidth.toFixed(3)} (dpr ${window.devicePixelRatio})`);
+                }
             } catch (e) {
-                console.warn("WebglAddon unavailable, using canvas renderer:", e && e.message ? e.message : e);
+                console.warn("WebglAddon disabled, using canvas renderer:", e && e.message ? e.message : e);
+                try { if (webglAddon) webglAddon.dispose(); } catch (err) { /* already gone */ }
+                // Nudge the core into re-measuring with the canvas renderer
+                try {
+                    this.term.options.fontSize = termFontSize + 0.01;
+                    this.term.options.fontSize = termFontSize;
+                } catch (err) { /* non-fatal */ }
             }
             // Ligatures addon ships a CommonJS-only build (depends on font-finder),
             // so it can't be loaded as a browser global; it's optional here.
@@ -291,13 +319,37 @@ class Terminal {
             this.clipboard = {
                 copy: () => {
                     if (!this.term.hasSelection()) return false;
-                    document.execCommand("copy");
-                    this.term.clearSelection();
+                    const selection = this.term.getSelection();
                     this.clipboard.didCopy = true;
+                    // Electron 44 removed the clipboard module from renderers and
+                    // rewired it to the W3C shape; write through the preload bridge.
+                    try {
+                        window.__edex.services.clipboard.writeText(selection);
+                    } catch (e) {
+                        // Last-resort fallback for old engines
+                        try { document.execCommand("copy"); } catch (err) {}
+                    }
+                    this.term.clearSelection();
                 },
-                paste: () => {
-                    this.write(remote.clipboard.readText());
+                // @electron/remote is gone: read the system clipboard through the
+                // preload bridge (async IPC) instead of a non-existent `remote`.
+                paste: async () => {
                     this.clipboard.didCopy = false;
+                    let text = "";
+                    try {
+                        text = await window.__edex.services.clipboard.readText();
+                    } catch (e) {
+                        console.warn("Clipboard read failed:", e && e.message ? e.message : e);
+                        return false;
+                    }
+                    if (typeof text === "string" && text.length > 0) {
+                        try {
+                            this.write(text);
+                        } catch (e) {
+                            console.warn("Clipboard paste failed:", e && e.message ? e.message : e);
+                        }
+                    }
+                    return true;
                 },
                 didCopy: false
             };
@@ -425,15 +477,30 @@ class Terminal {
                 this.onclosed(code, signal);
             });
 
+            // SECURITY: bind the terminal socket to loopback only.
+            // `ws` listens on every interface when `host` is omitted, which turned
+            // this socket into a raw shell reachable from the whole LAN (any peer
+            // could type into this TTY).
             this.wss = new this.Websocket({
+                host: "127.0.0.1",
                 port: this.port,
                 clientTracking: true,
                 verifyClient: info => {
+                    // Single consumer only: the renderer that owns this TTY.
                     if (this.wss.clients.length >= 1) {
                         return false;
-                    } else {
-                        return true;
                     }
+                    // Reject browser-originated handshakes: an arbitrary website
+                    // must not be able to drive ws://127.0.0.1:<port>. The app's own
+                    // renderer loads from file:// (Chromium may send "file://" or
+                    // "null"), so only those origins are accepted.
+                    const origin = (info && (info.origin ||
+                        (info.req && info.req.headers && info.req.headers.origin))) || "";
+                    if (origin && origin !== "null" && !/^file:\/\//i.test(origin)) {
+                        console.warn(`Terminal websocket rejected (origin: ${origin})`);
+                        return false;
+                    }
+                    return true;
                 }
             });
             this.Ipc.on("terminal_channel-"+this.port, (e, ...args) => {
