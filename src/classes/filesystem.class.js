@@ -9,6 +9,14 @@ class FilesystemDisplay {
         this.cwd = [];
         this.cwd_path = null;
         this.iconcolor = `rgb(${window.theme.r}, ${window.theme.g}, ${window.theme.b})`;
+
+        // Theme hot-switch hook: the icon tint is baked into every SVG's fill, so
+        // a colour change requires re-rendering the current directory.
+        this.restyle = theme => {
+            this.iconcolor = `rgb(${theme.r}, ${theme.g}, ${theme.b})`;
+            try { this.render(this.cwd, this.filesContainer.classList.contains("disks")); } catch (e) { /* not ready */ }
+        };
+
         this._formatBytes = (a,b) => {if(0==a)return"0 Bytes";var c=1024,d=b||2,e=["Bytes","KB","MB","GB","TB","PB","EB","ZB","YB"],f=Math.floor(Math.log(a)/Math.log(c));return parseFloat((a/Math.pow(c,f)).toFixed(d))+" "+e[f]};
         this.fileIconsMatcher = (name) => helpers.matchIcon(name);
         // Cache filename -> icon matches to avoid re-running hundreds of regexes per render (# perf)

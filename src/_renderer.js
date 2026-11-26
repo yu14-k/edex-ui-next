@@ -273,6 +273,81 @@ window._loadTheme = theme => {
     window.theme.r = theme.colors.r;
     window.theme.g = theme.colors.g;
     window.theme.b = theme.colors.b;
+
+    // Hot switching: re-style live modules instead of reloading the page.
+    // A reload tears down the terminal (new websocket, lost scrollback) so every
+    // theme change used to feel like a restart.
+    if (typeof window._restyleModules === "function") {
+        try { window._restyleModules(theme); } catch (e) {
+            console.warn("Theme restyle failed for live modules:", e && e.message ? e.message : e);
+        }
+    }
+};
+
+// Re-apply theme-dependent styling on already-instantiated modules. Each module
+// owns its own DOM/canvas, so a theme swap has to reach them individually.
+window._restyleModules = theme => {
+    const rgb = `rgb(${theme.r},${theme.g},${theme.b})`;
+
+    // xterm: colours + font come from the theme object
+    Object.keys(window.term || {}).forEach(key => {
+        const t = window.term[key];
+        if (!t || !t.term || !t.term.options) return;
+        try {
+            t.term.options.theme = {
+                foreground: theme.terminal.foreground,
+                background: theme.terminal.background,
+                cursor: theme.terminal.cursor,
+                cursorAccent: theme.terminal.cursorAccent,
+                selection: theme.terminal.selection
+            };
+        } catch (e) { /* terminal disposed */ }
+    });
+
+    // Smoothie charts (cpuinfo / conninfo) draw with an explicit stroke colour.
+    // The colour lives on each series' copy of the presentation options, which is
+    // what SmoothieChart reads at draw time (`chart.seriesSet[i].options`).
+    const restyleChart = chart => {
+        if (!chart || !Array.isArray(chart.seriesSet)) return;
+        chart.seriesSet.forEach(s => {
+            if (s && s.options) s.options.strokeStyle = rgb;
+        });
+    };
+    Object.keys(window.mods || {}).forEach(key => {
+        const mod = window.mods[key];
+        if (!mod) return;
+        (mod.charts || []).forEach(restyleChart);
+        // Modules may expose their own restyle hook (filesystem icon tint)
+        if (typeof mod.restyle === "function") {
+            try { mod.restyle(theme); } catch (e) {
+                console.warn(`Module "${key}" restyle failed:`, e && e.message ? e.message : e);
+            }
+        }
+    });
+
+    // The 3D globe bakes its colours into the encom-globe instance at construction
+    // (baseColor / markerColor / pinColor), and rebuilding it mid-session would
+    // drop the live connection pins. Its palette therefore follows a reload — this
+    // is the one module that does not hot-switch, and we say so instead of lying.
+    // (Guarded: _loadTheme also runs during boot, before window.mods exists.)
+    if (window.mods && window.mods.globe && window.mods.globe.globe) {
+        window.globeThemeStale = true;
+    }
+};
+
+// Switch theme without reloading the page: reads themes/<name>.json and applies it.
+// Returns true on success so callers (probe, command palette) can assert on it.
+window.applyThemeByName = name => {
+    try {
+        const file = path.join(themesDir, String(name).replace(/\.json$/, "") + ".json");
+        const theme = JSON.parse(fs.readFileSync(file, "utf-8"));
+        _loadTheme(theme);
+        window.settings.theme = name;
+        return true;
+    } catch (e) {
+        console.warn("applyThemeByName failed:", e && e.message ? e.message : e);
+        return false;
+    }
 };
 
 function initGraphicalErrorHandling() {
@@ -847,10 +922,17 @@ async function initUI() {
 }
 
 window.themeChanger = theme => {
+    // Hot-switch when possible: reloading tears down the terminal websocket and
+    // loses scrollback, so it is only kept as a fallback for a broken theme file.
+    if (typeof window.applyThemeByName === "function" && window.applyThemeByName(theme)) {
+        ipc.send("setThemeOverride", theme);
+        return true;
+    }
     ipc.send("setThemeOverride", theme);
     setTimeout(() => {
         window.location.reload(true);
     }, 100);
+    return false;
 };
 
 window.remakeKeyboard = layout => {
@@ -1174,6 +1256,7 @@ window.openSettings = async () => {
                 <br>`,
         buttons: [
             {label: "Open in External Editor", action:() => { services.shell.openPath(settingsFile); services.win.minimize(); }},
+            {label: "Open layout.json", action:() => { services.shell.openPath(layoutFile); services.win.minimize(); }},
             {label: "Save to Disk", action:() => window.writeSettingsFile()},
             {label: "Reload UI", action:() => window.location.reload(true)},
             {label: "Restart eDEX", action:() => { services.app.relaunch(); services.app.quit(); }}
@@ -1244,6 +1327,8 @@ window.writeSettingsFile = () => {
     };
     window.writeLayoutFile(layoutInput);
 
+    const previousTheme = window.settings.theme;
+
     window.settings = {
         shell: document.getElementById("settingsEditor-shell").value,
         shellArgs: document.getElementById("settingsEditor-shellArgs").value,
@@ -1281,6 +1366,15 @@ window.writeSettingsFile = () => {
 
     fs.writeFileSync(settingsFile, JSON.stringify(window.settings, "", 4));
     document.getElementById("settingsEditorStatus").innerText = "New values written to settings.json file at "+new Date().toTimeString();
+
+    // Apply a theme change made in the panel immediately (no reload needed).
+    if (previousTheme !== window.settings.theme && typeof window.applyThemeByName === "function") {
+        if (window.applyThemeByName(window.settings.theme)) {
+            document.getElementById("settingsEditorStatus").innerText += " — theme applied live";
+        } else {
+            document.getElementById("settingsEditorStatus").innerText += " — theme could not be applied; reload required";
+        }
+    }
 };
 
 window.toggleFullScreen = async () => {

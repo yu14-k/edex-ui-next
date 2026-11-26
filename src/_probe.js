@@ -215,6 +215,38 @@ module.exports = function attachProbe(win) {
             + "} catch (e) { return { ok: false, error: (e && e.message) ? e.message : String(e) }; }"
             + "})()";
 
+        // 7. Theme hot-switch: switching must restyle the live UI without reloading
+        //    the page (a reload would tear down the terminal websocket).
+        const THEME_CHECK = `
+            (async () => {
+                try {
+                    const t = window.term[window.currentTerm];
+                    const socketBefore = t.socket ? t.socket.readyState : null;
+                    const startTheme = window.settings.theme;
+                    const target = (startTheme === "cyborg") ? "tron" : "cyborg";
+                    const ok = window.applyThemeByName(target);
+                    await new Promise(r => setTimeout(r, 500));
+                    const socketAfter = t.socket ? t.socket.readyState : null;
+                    const chart = window.mods.cpuinfo && window.mods.cpuinfo.charts[0] &&
+                        window.mods.cpuinfo.charts[0].seriesSet && window.mods.cpuinfo.charts[0].seriesSet[0];
+                    const result = {
+                        applied: ok === true,
+                        theme: window.settings.theme,
+                        termFg: t.term.options.theme.foreground,
+                        chartStroke: chart ? chart.options.strokeStyle : null,
+                        socketStable: socketBefore === socketAfter,
+                        globeStale: !!window.globeThemeStale
+                    };
+                    window.applyThemeByName(startTheme);
+                    await new Promise(r => setTimeout(r, 300));
+                    result.restored = window.settings.theme === startTheme;
+                    return result;
+                } catch (e) {
+                    return { applied: false, error: (e && e.message) ? e.message : String(e) };
+                }
+            })()
+        `;
+
         // Quit gracefully (like a user closing the window) instead of an abrupt
         // process.exit: this also exercises the real shutdown path.
         const finish = () => {
@@ -281,6 +313,13 @@ module.exports = function attachProbe(win) {
                 console.log("EDEX_PROBE_COPY " + JSON.stringify(Object.assign({}, copy, { clipboard: String(clip).slice(0, 40) })));
             } catch (e) {
                 console.log("EDEX_PROBE_COPY_ERROR " + (e && e.message ? e.message : String(e)));
+            }
+
+            try {
+                const theme = await win.webContents.executeJavaScript(THEME_CHECK);
+                console.log("EDEX_PROBE_THEME " + JSON.stringify(theme));
+            } catch (e) {
+                console.log("EDEX_PROBE_THEME_ERROR " + (e && e.message ? e.message : String(e)));
             }
 
             try {
