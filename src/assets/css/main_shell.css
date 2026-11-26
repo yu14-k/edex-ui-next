@@ -1,5 +1,7 @@
 section#main_shell {
-    width: 65%;
+    /* Overridden at runtime from layout.json (applyLayoutGeometry); 65% is the
+       historical default so an unconfigured install looks unchanged. */
+    width: var(--edex-term-width, 65%);
     height: 60.3%;
     padding: 0.74vh;
     /* border: 0.18vh solid rgba(var(--color_r), var(--color_g), var(--color_b), 0.5); */

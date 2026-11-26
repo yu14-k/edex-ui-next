@@ -49,6 +49,29 @@ module.exports = function attachProbe(win) {
                 keyboard: !!window.keyboard,
                 mods: window.mods ? Object.keys(window.mods).length : 0,
                 currentTerm: window.currentTerm,
+                // Declarative layout state: proves the config was loaded, normalised
+                // and actually applied to the DOM (not just parsed).
+                layout: (function () {
+                    try {
+                        const l = window.layout;
+                        if (!l) return null;
+                        const leftEl = document.getElementById("mod_column_left");
+                        const rightEl = document.getElementById("mod_column_right");
+                        const shell = document.getElementById("main_shell");
+                        return {
+                            leftWidth: l.columns.left.width,
+                            rightWidth: l.columns.right.width,
+                            termWidth: l.terminal.width,
+                            leftModules: l.columns.left.modules,
+                            rightModules: l.columns.right.modules,
+                            viewport: window.innerWidth,
+                            domLeftWidth: leftEl ? Math.round(leftEl.getBoundingClientRect().width) : null,
+                            domRightWidth: rightEl ? Math.round(rightEl.getBoundingClientRect().width) : null,
+                            domShellWidth: shell ? Math.round(shell.getBoundingClientRect().width) : null,
+                            warnings: (window.layoutWarnings || []).length
+                        };
+                    } catch (e) { return { error: e && e.message ? e.message : String(e) }; }
+                })(),
                 // Terminal typography metrics — font size/family regressions are
                 // invisible to the other assertions but obvious to users.
                 termMetrics: (function () {

@@ -1,5 +1,7 @@
 section.mod_column {
-    width: 17%;
+    /* Width comes from layout.json via a custom property (see applyLayoutGeometry);
+       17% is the historical default so an unconfigured install looks unchanged. */
+    width: var(--edex-col-left-width, 17%);
     top: 2.5vh;
     min-height: 10%;
     max-height: 96%;
@@ -42,6 +44,7 @@ section.mod_column > div {
 }
 
 section#mod_column_left {
+    width: var(--edex-col-left-width, 17%);
     left: -0.555vh;
     align-items: flex-end;
 }
@@ -51,6 +54,7 @@ section#mod_column_left > h3.title {
 }
 
 section#mod_column_right {
+    width: var(--edex-col-right-width, 17%);
     right: -0.555vh;
     align-items: flex-start;
 }

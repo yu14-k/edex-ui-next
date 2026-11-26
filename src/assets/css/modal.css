@@ -144,6 +144,27 @@ div.modal_popup table:not(#settingsEditor) td:first-child {
     text-align: center;
 }
 
+/* Section divider + hint rows inside the settings editor (layout block) */
+div.modal_popup table#settingsEditor td.settingsEditor-section {
+    background: rgba(var(--color_r), var(--color_g), var(--color_b), 0.12);
+    color: rgb(var(--color_r), var(--color_g), var(--color_b));
+    font-size: 1.8vh;
+    text-align: left;
+    padding: 0.5vh 0.8vh;
+}
+
+div.modal_popup table#settingsEditor td.settingsEditor-section i {
+    opacity: 0.75;
+    font-size: 1.4vh;
+}
+
+div.modal_popup table#settingsEditor td.settingsEditor-hint {
+    font-size: 1.3vh;
+    opacity: 0.8;
+    line-height: 1.5;
+    text-align: left;
+}
+
 div.modal_popup textarea {
     background: var(--color_light_black);
     color: rgb(var(--color_r), var(--color_g), var(--color_b));

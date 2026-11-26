@@ -1,0 +1,94 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "eDEX-UI theme",
+  "type": "object",
+  "required": ["colors", "cssvars", "terminal", "globe"],
+  "additionalProperties": true,
+  "properties": {
+    "$schema": { "type": "string" },
+    "colors": {
+      "type": "object",
+      "required": ["r", "g", "b", "black", "light_black", "grey"],
+      "properties": {
+        "r": { "$ref": "#/definitions/colorChannel" },
+        "g": { "$ref": "#/definitions/colorChannel" },
+        "b": { "$ref": "#/definitions/colorChannel" },
+        "black": { "$ref": "#/definitions/colorValue" },
+        "light_black": { "$ref": "#/definitions/colorValue" },
+        "grey": { "$ref": "#/definitions/colorValue" },
+        "red": { "$ref": "#/definitions/colorValue" },
+        "yellow": { "$ref": "#/definitions/colorValue" },
+        "white": { "$ref": "#/definitions/colorValue" },
+        "brightBlack": { "$ref": "#/definitions/colorValue" },
+        "brightRed": { "$ref": "#/definitions/colorValue" },
+        "brightGreen": { "$ref": "#/definitions/colorValue" },
+        "brightYellow": { "$ref": "#/definitions/colorValue" },
+        "brightBlue": { "$ref": "#/definitions/colorValue" },
+        "brightMagenta": { "$ref": "#/definitions/colorValue" },
+        "brightCyan": { "$ref": "#/definitions/colorValue" },
+        "brightWhite": { "$ref": "#/definitions/colorValue" }
+      }
+    },
+    "cssvars": {
+      "type": "object",
+      "required": ["font_main", "font_main_light"],
+      "properties": {
+        "font_main": { "$ref": "#/definitions/safeString" },
+        "font_main_light": { "$ref": "#/definitions/safeString" }
+      }
+    },
+    "terminal": {
+      "type": "object",
+      "required": ["fontFamily", "foreground", "background"],
+      "properties": {
+        "fontFamily": { "$ref": "#/definitions/safeString" },
+        "fontSize": { "type": "number", "minimum": 6, "maximum": 96 },
+        "fontWeight": { "type": ["string", "number"] },
+        "fontWeightBold": { "type": ["string", "number"] },
+        "cursorStyle": { "enum": ["block", "underline", "bar"] },
+        "cursorBlink": { "type": "boolean" },
+        "letterSpacing": { "type": "number", "minimum": 0, "maximum": 4 },
+        "lineHeight": { "type": "number", "minimum": 0.8, "maximum": 2 },
+        "allowTransparency": { "type": "boolean" },
+        "foreground": { "$ref": "#/definitions/colorValue" },
+        "background": { "$ref": "#/definitions/colorValue" },
+        "cursor": { "$ref": "#/definitions/colorValue" },
+        "cursorAccent": { "$ref": "#/definitions/colorValue" },
+        "selection": { "type": "string" },
+        "colorFilter": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "globe": {
+      "type": "object",
+      "properties": {
+        "base": { "$ref": "#/definitions/colorValue" },
+        "marker": { "$ref": "#/definitions/colorValue" },
+        "pin": { "$ref": "#/definitions/colorValue" },
+        "satellite": { "$ref": "#/definitions/colorValue" }
+      }
+    },
+    "injectCSS": {
+      "type": "string",
+      "description": "Raw CSS appended to the theme <style> block. Sanitised at runtime by _purifyCSS (strips '<'). Only trusted, locally-installed themes should use this."
+    }
+  },
+  "definitions": {
+    "colorChannel": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "colorValue": {
+      "type": "string",
+      "pattern": "(^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$)|^(?:rgb|rgba|hsl|hsla)\\(.{0,60}\\)$"
+    },
+    "safeString": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9 _'\\-]{1,80}$",
+      "description": "Font names go into a CSS custom property and a FontFace URL; quotes/semicolons/newlines are rejected here even though the runtime also sanitises them."
+    }
+  }
+}

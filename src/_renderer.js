@@ -92,7 +92,7 @@ const ipc = window.__edex.ipc;
 const services = window.__edex.services;
 const helpers = window.__edex.helpers;
 
-let settingsDir, themesDir, keyboardsDir, fontsDir, settingsFile, shortcutsFile, lastWindowStateFile;
+let settingsDir, themesDir, keyboardsDir, fontsDir, settingsFile, shortcutsFile, lastWindowStateFile, layoutFile;
 
 async function initPaths() {
     settingsDir = await services.app.getPath("userData");
@@ -102,6 +102,28 @@ async function initPaths() {
     settingsFile = path.join(settingsDir, "settings.json");
     shortcutsFile = path.join(settingsDir, "shortcuts.json");
     lastWindowStateFile = path.join(settingsDir, "lastWindowState.json");
+    layoutFile = path.join(settingsDir, "layout.json");
+
+    // Declarative layout: which module lives in which column, column widths and
+    // terminal width. A missing file means "use the historical default layout";
+    // a malformed file is normalised (unknown modules dropped, widths clamped)
+    // instead of blank-screening the UI.
+    window.layout = (function () {
+        const raw = window._readJsonConfig(layoutFile, null);
+        if (raw === null) {
+            // First run: write the defaults out so the file is discoverable/editable.
+            try {
+                fs.writeFileSync(layoutFile, JSON.stringify(window.EDEX_LAYOUT.DEFAULT_LAYOUT, "", 4), "utf-8");
+            } catch (e) {
+                console.warn("Could not write default layout.json:", e && e.message ? e.message : e);
+            }
+            return JSON.parse(JSON.stringify(window.EDEX_LAYOUT.DEFAULT_LAYOUT));
+        }
+        const result = window.EDEX_LAYOUT.normalize(raw);
+        result.warnings.forEach(w => console.warn("[layout] " + w));
+        window.layoutWarnings = result.warnings;
+        return result.layout;
+    })();
 
     // Load config (tolerant: a corrupted file falls back to defaults instead of
     // aborting the whole UI boot). The defaults come from the main process so
@@ -669,18 +691,63 @@ async function initUI() {
     if (services.win.onBlur) services.win.onBlur(() => { window._pollState.focused = false; });
     if (services.win.onFocus) services.win.onFocus(() => { window._pollState.focused = true; });
 
-    // Left column
-    initModule("clock", () => new Clock("mod_column_left"));
-    initModule("sysinfo", () => new Sysinfo("mod_column_left"));
-    initModule("hardwareInspector", () => new HardwareInspector("mod_column_left"));
-    initModule("cpuinfo", () => new Cpuinfo("mod_column_left"));
-    initModule("ramwatcher", () => new RAMwatcher("mod_column_left"));
-    initModule("toplist", () => new Toplist("mod_column_left"));
+    // Modules are instantiated from the declarative layout instead of a hard-coded
+    // list: column membership, order and visibility all come from layout.json.
+    // An unknown/misspelled module name was already filtered by the normaliser,
+    // and a factory that throws is isolated (the rest of the UI keeps working).
+    const MODULE_FACTORIES = {
+        clock: (parent) => new Clock(parent),
+        sysinfo: (parent) => new Sysinfo(parent),
+        hardwareInspector: (parent) => new HardwareInspector(parent),
+        cpuinfo: (parent) => new Cpuinfo(parent),
+        ramwatcher: (parent) => new RAMwatcher(parent),
+        toplist: (parent) => new Toplist(parent),
+        netstat: (parent) => new Netstat(parent),
+        globe: (parent) => new LocationGlobe(parent),
+        conninfo: (parent) => new Conninfo(parent)
+    };
 
-    // Right column
-    initModule("netstat", () => new Netstat("mod_column_right"));
-    initModule("globe", () => new LocationGlobe("mod_column_right"));
-    initModule("conninfo", () => new Conninfo("mod_column_right"));
+    const applyLayoutGeometry = () => {
+        const layout = window.layout;
+        const root = document.documentElement;
+        const left = layout.columns.left.width;
+        const right = layout.columns.right.width;
+        const term = layout.terminal.width;
+        // Inline values beat the stylesheet, so no CSS edit is needed.
+        root.style.setProperty("--edex-col-left-width", left + "%");
+        root.style.setProperty("--edex-col-right-width", right + "%");
+        root.style.setProperty("--edex-term-width", term + "%");
+        const leftEl = document.getElementById("mod_column_left");
+        const rightEl = document.getElementById("mod_column_right");
+        const shellEl = document.getElementById("main_shell");
+        if (leftEl) leftEl.style.width = left + "%";
+        if (rightEl) rightEl.style.width = right + "%";
+        if (shellEl) shellEl.style.width = term + "%";
+        if (window.term && window.term[window.currentTerm] && typeof window.term[window.currentTerm].fit === "function") {
+            try { window.term[window.currentTerm].fit(); } catch (e) { /* not ready yet */ }
+        }
+    };
+    window.applyLayoutGeometry = applyLayoutGeometry;
+
+    const placeModules = () => {
+        const layout = window.layout;
+        const columnIds = { left: "mod_column_left", right: "mod_column_right" };
+        for (const col of ["left", "right"]) {
+            for (const name of layout.columns[col].modules) {
+                const factory = MODULE_FACTORIES[name];
+                if (!factory) {
+                    console.warn(`[layout] no factory for module "${name}"`);
+                    continue;
+                }
+                // Parent column is passed in, so a module moves columns purely by
+                // editing layout.json — no code change required.
+                initModule(name, () => factory(columnIds[col]));
+            }
+        }
+        applyLayoutGeometry();
+    };
+
+    placeModules();
 
     // Fade-in animations
     document.querySelectorAll(".mod_column").forEach(e => {
@@ -942,6 +1009,41 @@ window.openSettings = async () => {
                         <td><input type="number" id="settingsEditor-termFontSize" value="${window._escapeHtml(window.settings.termFontSize)}"></td>
                     </tr>
                     <tr>
+                        <td colspan="3" class="settingsEditor-section">Layout <i>(layout.json — applies immediately)</i></td>
+                    </tr>
+                    <tr>
+                        <td>columns.left.width</td>
+                        <td>Left panel column width, in % of the viewport (10–30)</td>
+                        <td><input type="number" min="10" max="30" step="0.5" id="settingsEditor-layoutLeft" value="${window._escapeHtml(window.layout.columns.left.width)}"> %</td>
+                    </tr>
+                    <tr>
+                        <td>columns.right.width</td>
+                        <td>Right panel column width, in % of the viewport (10–30)</td>
+                        <td><input type="number" min="10" max="30" step="0.5" id="settingsEditor-layoutRight" value="${window._escapeHtml(window.layout.columns.right.width)}"> %</td>
+                    </tr>
+                    <tr>
+                        <td>terminal.width</td>
+                        <td>Terminal width, in % of the viewport (40–80)</td>
+                        <td><input type="number" min="40" max="80" step="0.5" id="settingsEditor-layoutTerm" value="${window._escapeHtml(window.layout.terminal.width)}"> %</td>
+                    </tr>
+                    <tr>
+                        <td>modules.left</td>
+                        <td>Modules shown in the left column (comma-separated, in order)</td>
+                        <td><input type="text" id="settingsEditor-layoutModulesLeft" value="${window._escapeHtml(window.layout.columns.left.modules.join(", "))}"></td>
+                    </tr>
+                    <tr>
+                        <td>modules.right</td>
+                        <td>Modules shown in the right column (comma-separated, in order)</td>
+                        <td><input type="text" id="settingsEditor-layoutModulesRight" value="${window._escapeHtml(window.layout.columns.right.modules.join(", "))}"></td>
+                    </tr>
+                    <tr>
+                        <td colspan="3" class="settingsEditor-hint">
+                            Known modules: ${window._escapeHtml(window.EDEX_LAYOUT.KNOWN_MODULES.join(", "))}.
+                            Removing a module from both lists hides it. Restart required for module changes;
+                            widths apply immediately. File: <code>${window._escapeHtml(layoutFile)}</code>
+                        </td>
+                    </tr>
+                    <tr>
                         <td>audio</td>
                         <td>Activate audio sound effects</td>
                         <td><select id="settingsEditor-audio">
@@ -1091,7 +1193,57 @@ window.writeFile = (path) => {
     });
 };
 
+// Persist a layout edit: normalise (clamp widths, drop unknown modules), write
+// layout.json, and apply the geometry live. Module membership changes need a
+// restart because modules hold timers/websockets, which is stated in the panel.
+window.writeLayoutFile = input => {
+    const result = window.EDEX_LAYOUT.normalize(input);
+    result.warnings.forEach(w => console.warn("[layout] " + w));
+    window.layoutWarnings = result.warnings;
+    window.layout = result.layout;
+    try {
+        fs.writeFileSync(layoutFile, JSON.stringify(result.layout, "", 4), "utf-8");
+    } catch (e) {
+        new Modal({
+            type: "error",
+            title: "Could not save layout.json",
+            message: window._escapeHtml(e && e.message ? e.message : String(e))
+        });
+        return result;
+    }
+    if (typeof window.applyLayoutGeometry === "function") window.applyLayoutGeometry();
+    if (result.warnings.length > 0) {
+        new Modal({
+            type: "warning",
+            title: "Layout saved with adjustments",
+            message: result.warnings.map(w => window._escapeHtml(w)).join("<br>")
+        });
+    }
+    return result;
+};
+
 window.writeSettingsFile = () => {
+    // Layout values live in layout.json, not settings.json: collect and normalise
+    // them first so a bad input is clamped instead of being written verbatim.
+    const layoutInput = {
+        version: 1,
+        columns: {
+            left: {
+                width: Number(document.getElementById("settingsEditor-layoutLeft").value),
+                modules: String(document.getElementById("settingsEditor-layoutModulesLeft").value)
+                    .split(",").map(s => s.trim()).filter(Boolean)
+            },
+            right: {
+                width: Number(document.getElementById("settingsEditor-layoutRight").value),
+                modules: String(document.getElementById("settingsEditor-layoutModulesRight").value)
+                    .split(",").map(s => s.trim()).filter(Boolean)
+            }
+        },
+        terminal: { width: Number(document.getElementById("settingsEditor-layoutTerm").value) },
+        modules: window.layout.modules
+    };
+    window.writeLayoutFile(layoutInput);
+
     window.settings = {
         shell: document.getElementById("settingsEditor-shell").value,
         shellArgs: document.getElementById("settingsEditor-shellArgs").value,

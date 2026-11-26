@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "eDEX-UI layout config",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "version": { "type": "number" },
+    "columns": {
+      "type": "object",
+      "properties": {
+        "left": { "$ref": "#/definitions/column" },
+        "right": { "$ref": "#/definitions/column" }
+      }
+    },
+    "terminal": {
+      "type": "object",
+      "properties": {
+        "width": { "type": ["number", "string"] }
+      }
+    },
+    "modules": {
+      "type": "object",
+      "additionalProperties": { "type": "object" }
+    }
+  },
+  "definitions": {
+    "column": {
+      "type": "object",
+      "properties": {
+        "width": { "type": ["number", "string"] },
+        "modules": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}
