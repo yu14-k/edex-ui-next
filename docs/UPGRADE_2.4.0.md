@@ -206,6 +206,19 @@ Active handles at quit: ["MessagePort","Socket","ChildProcess"x7,"Server","Socke
 - **最小化降幅也有限**（13%→11%）：`document.hidden` 在本机 Electron 45 上**不会**因为最小化而触发（实测 `visibilitychange` 事件 0 次），所以暂停逻辑实际没生效——真正能让后台静默的，是把 `backgroundThrottling` 打开（现在显式设成 `false`），但那会让隐藏时的 timer 也被节流，需单独验证。
 - **`@xterm/addon-canvas` 不兼容 xterm 6**（peer 要求 `^5`，加载时报 `onShowLinkUnderline` 未定义），所以 WebGL 被拒时只能回落到 DOM 渲染器；尝试用「字号吸附到整设备像素」换取 WebGL 保留的方案实测**反而更费 CPU**（77–88%），已回退。
 
+### 10.5b 包体瘦身（同日完成）
+
+| 项 | 之前 | 之后 |
+| --- | --- | --- |
+| 安装包 | 137.7 MB | **125.6 MB** |
+| `app.asar` 条目 | 2192 | **1765** |
+| asar 内 `pdfjs-dist` | 620 条 | **0** |
+| asar 内 `@napi-rs/canvas` | 18 条 | **0** |
+| asar 内 `.pdb` | 有 | **0** |
+| `app.asar.unpacked` | 47.2 MB | **9.2 MB** |
+
+改法：`pdfjs-dist` 移入 `devDependencies`（`vendor.js` 仍能装到，electron-builder 只收集生产依赖 → 连带剔掉 `@napi-rs/canvas` 38 MB）；`build.files` 排除 `**/*.pdb`；`asarUnpack` 从 `**/node_modules/node-pty/**` 收窄到 `build/Release` 下的 `pty.node`/`dll`/`exe`。打包产物探针全过。
+
 ### 10.6 下一步（按收益排序）
 
 1. 打开 `backgroundThrottling` + 用 `win.on("minimize")`/`hide` 主动通知渲染进程暂停（绕开不可靠的 `visibilitychange`）——预计最小化可达 **<3%**。
