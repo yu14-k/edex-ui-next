@@ -515,6 +515,20 @@ function createWindow(settings) {
     }
 
     // Forward window lifecycle events to the renderer bridge
+    // Minimize/hide are reported explicitly: on this Electron build the renderer
+    // does NOT receive a `visibilitychange` event when the window is minimized
+    // (measured), so the polling/rendering pause has to be driven from here.
+    const notifyRenderer = (channel) => {
+        if (!win || win.isDestroyed()) return;
+        try { win.webContents.send(channel); } catch (e) { /* window tearing down */ }
+    };
+    win.on("minimize", () => notifyRenderer("edex:win:hidden"));
+    win.on("hide", () => notifyRenderer("edex:win:hidden"));
+    win.on("restore", () => notifyRenderer("edex:win:visible"));
+    win.on("show", () => notifyRenderer("edex:win:visible"));
+    win.on("blur", () => notifyRenderer("edex:win:blur"));
+    win.on("focus", () => notifyRenderer("edex:win:focus"));
+
     win.on("resize", () => {
         if (!win.isDestroyed()) win.webContents.send("edex:win:resize");
     });

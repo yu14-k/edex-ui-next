@@ -182,7 +182,11 @@ const services = {
         toggleDevTools: () => ipc.send("edex:win:toggleDevTools"),
         setVisualZoomLevelLimits: (min, max) => webFrame.setVisualZoomLevelLimits(min, max),
         onResize: (cb) => ipc.on("edex:win:resize", cb),
-        onLeaveFullScreen: (cb) => ipc.on("edex:win:leave-full-screen", cb)
+        onLeaveFullScreen: (cb) => ipc.on("edex:win:leave-full-screen", cb),
+        onHidden: (cb) => ipc.on("edex:win:hidden", cb),
+        onVisible: (cb) => ipc.on("edex:win:visible", cb),
+        onBlur: (cb) => ipc.on("edex:win:blur", cb),
+        onFocus: (cb) => ipc.on("edex:win:focus", cb)
     },
     username: () => ipc.invoke("edex:username"),
     config: {

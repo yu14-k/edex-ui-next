@@ -186,6 +186,20 @@ Active handles at quit: ["MessagePort","Socket","ChildProcess"x7,"Server","Socke
 | 可见 CPU | 61% | **54%** | 略降 |
 | 最小化 CPU | 13% | **11%** | 略降 |
 
+### 10.4b 补丁：最小化现在真的会暂停（主进程事件驱动）
+
+`document.hidden` 在本机 Electron 45 最小化时**不触发**（实测 0 次事件），所以第一版暂停逻辑空转。
+改为由主进程监听 `minimize` / `hide` / `restore` / `show` 并通过 IPC 通知渲染进程：
+
+| 指标 | 基线 | 优化后 |
+| --- | --- | --- |
+| 进程数 | 12 | **6** |
+| 工作集 | 1,094 MB | **722 MB** |
+| 可见 CPU | 61% | **51%** |
+| **最小化 CPU** | **13%** | **4%** |
+
+验证方式：日志里会出现 `[perf] modules paused (hidden=false)`（`hidden=false` 是预期值——暂停由窗口事件驱动，不是 visibilitychange）。
+
 ### 10.5 诚实说明（没做到的）
 
 - **可见时 CPU 只降了 7 个百分点**：剩下的开销在渲染进程（~50%）与 GPU 进程（~34%），来源是 xterm 重绘 + 3D globe + 9 个模块的 DOM 更新，不是 si 采集。要再降必须动渲染路径（`app://` + 更少 DOM 更新 + 关 globe 的可选开关），是另一个量级的工程。

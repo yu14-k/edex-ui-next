@@ -655,6 +655,20 @@ async function initUI() {
         window._setModulesPaused(document.hidden === true);
     });
 
+    // The renderer does not get `visibilitychange` when the window is minimized on
+    // this Electron build (measured: 0 events), so the main process reports
+    // minimize/hide/blur explicitly. Both sources feed the same pause switch.
+    if (services.win.onHidden) services.win.onHidden(() => {
+        window._pollState.hidden = true;
+        window._setModulesPaused(true);
+    });
+    if (services.win.onVisible) services.win.onVisible(() => {
+        window._pollState.hidden = false;
+        window._setModulesPaused(document.hidden === true);
+    });
+    if (services.win.onBlur) services.win.onBlur(() => { window._pollState.focused = false; });
+    if (services.win.onFocus) services.win.onFocus(() => { window._pollState.focused = true; });
+
     // Left column
     initModule("clock", () => new Clock("mod_column_left"));
     initModule("sysinfo", () => new Sysinfo("mod_column_left"));
