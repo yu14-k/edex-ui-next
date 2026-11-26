@@ -60,7 +60,11 @@
     "forceCodeSigning": false,
     "npmRebuild": false,
     "asarUnpack": [
-      "**/node_modules/node-pty/**"
+      "**/node_modules/node-pty/build/Release/pty.node",
+      "**/node_modules/node-pty/build/Release/*.dll",
+      "**/node_modules/node-pty/build/Release/*.exe",
+      "**/node_modules/node-pty/build/Release/conpty/*.exe",
+      "**/node_modules/node-pty/build/Release/conpty/*.dll"
     ],
     "artifactName": "eDEX-UI-${os}-${arch}.${ext}",
     "linux": {
@@ -110,7 +114,8 @@
       "!node_modules/edex-ui{,/**/*}",
       "!dist{,/**/*}",
       "!**/*.map",
-      "!**/.git{,/**/*}"
+      "!**/.git{,/**/*}",
+      "!**/*.pdb"
     ]
   },
   "devDependencies": {
