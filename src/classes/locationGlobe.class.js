@@ -52,7 +52,23 @@ class LocationGlobe {
             container.append(this.globe.domElement);
 
             // Init animations
+            // The globe repaints via requestAnimationFrame at 30fps and is by far
+            // the most expensive module. `_paused` lets the app stop it entirely
+            // while the window is hidden (see window._setModulesPaused).
+            this._paused = false;
+            this.pause = () => { this._paused = true; };
+            this.resume = () => { this._paused = false; };
             this._animate = () => {
+                if (this._paused) {
+                    // Keep the loop alive but idle: resuming must not require
+                    // re-creating the globe or re-registering the callback.
+                    setTimeout(() => {
+                        if (window.mods.globe._animate) {
+                            try { requestAnimationFrame(window.mods.globe._animate); } catch (e) { console.warn(e); }
+                        }
+                    }, 1000 / 5);
+                    return;
+                }
                 if (window.mods.globe.globe) {
                     window.mods.globe.globe.tick();
                 }
@@ -124,12 +140,12 @@ class LocationGlobe {
         // Init updaters when intro animation is done
         setTimeout(() => {
             this.updateLoc();
-            this.locUpdater = setInterval(() => {
+            this.locUpdater = window.registerPollTimer(() => {
                 this.updateLoc();
             }, 1000);
 
             this.updateConns();
-            this.connsUpdater = setInterval(() => {
+            this.connsUpdater = window.registerPollTimer(() => {
                 this.updateConns();
             }, 3000);
         }, 4000);

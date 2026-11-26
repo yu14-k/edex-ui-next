@@ -24,7 +24,7 @@ class HardwareInspector {
         this.parent.append(this._element);
 
         this.updateInfo();
-        this.infoUpdater = setInterval(() => {
+        this.infoUpdater = window.registerPollTimer(() => {
             this.updateInfo();
         }, 20000);
     }

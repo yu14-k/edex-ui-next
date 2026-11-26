@@ -15,7 +15,7 @@ class Toplist {
         this.currentlyUpdating = false;
 
         this.updateList();
-        this.listUpdater = setInterval(() => {
+        this.listUpdater = window.registerPollTimer(() => {
             this.updateList();
         }, 2000);
     }
@@ -184,26 +184,36 @@ class Toplist {
                     }
                 });
 
-                if (removed) clearInterval(updateInterval);
+                if (removed) window.clearPollTimer(updateInterval);
                 else {
-                    document.querySelectorAll("#processList > tr").forEach(el => {
-                        el.remove();
+                    // Reuse rows and only update their text (the old code removed
+                    // every <tr> and rebuilt it once per second, which kept the
+                    // modal permanently re-laying-out).
+                    const tbody = document.getElementById("processList");
+                    const rows = tbody ? tbody.rows : [];
+                    list.forEach((proc, i) => {
+                        let el = rows[i];
+                        if (!el) {
+                            el = document.createElement("tr");
+                            el.innerHTML = '<td class="pid"></td><td class="name"></td><td class="user"></td>' +
+                                '<td class="cpu"></td><td class="mem"></td><td class="state"></td>' +
+                                '<td class="started"></td><td class="runtime"></td>';
+                            tbody.appendChild(el);
+                        }
+                        const c = el.children;
+                        c[0].textContent = proc.pid;
+                        c[1].textContent = proc.name;
+                        c[2].textContent = proc.user;
+                        c[3].textContent = Math.round(proc.cpu * 10) / 10 + "%";
+                        c[4].textContent = Math.round(proc.mem * 10) / 10 + "%";
+                        c[5].textContent = proc.state;
+                        c[6].textContent = proc.started;
+                        c[7].textContent = formatRuntime(proc.runtime);
                     });
-
-                    list.forEach(proc => {
-                        let el = document.createElement("tr");
-                        // Process fields (name/user/state) are externally influenced;
-                        // escape them before HTML insertion (JS-XSS-001).
-                        el.innerHTML = `<td class="pid">${proc.pid}</td>
-                            <td class="name">${window._escapeHtml(proc.name)}</td>
-                            <td class="user">${window._escapeHtml(proc.user)}</td>
-                            <td class="cpu">${Math.round(proc.cpu * 10) / 10}%</td>
-                            <td class="mem">${Math.round(proc.mem * 10) / 10}%</td>
-                            <td class="state">${window._escapeHtml(proc.state)}</td>
-                            <td class="started">${window._escapeHtml(proc.started)}</td>
-                            <td class="runtime">${formatRuntime(proc.runtime)}</td>`;
-                        document.getElementById("processList").append(el);
-                    });
+                    // Drop surplus rows left over from a longer previous list
+                    for (let i = list.length; i < rows.length; i++) {
+                        if (rows[i] && rows[i].parentNode) rows[i].parentNode.removeChild(rows[i]);
+                    }
                 }
             });
         }
@@ -254,7 +264,7 @@ class Toplist {
         updateProcessList();
         window.keyboard.attach();
         window.term[window.currentTerm].term.focus();
-        var updateInterval = setInterval(updateProcessList, 1000);
+        var updateInterval = window.registerPollTimer(updateProcessList, 1000);
     }
 }
 

@@ -40,13 +40,13 @@ class Sysinfo {
 
         this.updateDate();
         this.updateUptime();
-        this.uptimeUpdater = setInterval(() => {
+        this.uptimeUpdater = window.registerPollTimer(() => {
             this.updateUptime();
-        }, 60000);
-        this.updateBattery();
-        this.batteryUpdater = setInterval(() => {
-            this.updateBattery();
         }, 3000);
+        this.updateBattery();
+        this.batteryUpdater = window.registerPollTimer(() => {
+            this.updateBattery();
+        }, 60000);
     }
     updateDate() {
         let time = new Date();

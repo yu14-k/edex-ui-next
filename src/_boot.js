@@ -497,8 +497,23 @@ function createWindow(settings) {
         require("./_probe.js")(win);
     }
 
-    signale.complete("Frontend window created!");
-    win.show();
+    // Show on first paint instead of immediately: the old code called show()
+    // before the renderer had anything to draw, so the user saw a black window
+    // while boot.js/theme/fonts were still loading. Probe runs keep the old
+    // behaviour so headless runs are unaffected.
+    let shown = false;
+    const showOnce = () => {
+        if (shown || win.isDestroyed()) return;
+        shown = true;
+        signale.complete("Frontend window created!");
+        win.show();
+    };
+    win.once("ready-to-show", showOnce);
+    if (process.env.EDEX_PROBE) {
+        // A hidden window may never fire ready-to-show under some CI compositors
+        setTimeout(showOnce, 1500);
+    }
+
     // Forward window lifecycle events to the renderer bridge
     win.on("resize", () => {
         if (!win.isDestroyed()) win.webContents.send("edex:win:resize");
@@ -564,8 +579,9 @@ app.on('ready', async () => {
         signale.watch("Waiting for frontend connection...");
     };
 
-    // Support for multithreaded systeminformation calls
-    signale.pending("Starting multithreaded calls controller...");
+    // Systeminformation controller (single utilityProcess, started lazily on the
+    // first call instead of forking a pool up front).
+    signale.pending("Starting systeminformation controller...");
     require("./_multithread.js");
 
     createWindow(settings);

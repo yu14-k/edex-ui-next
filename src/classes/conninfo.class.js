@@ -57,9 +57,19 @@ class Conninfo {
 
         // Init updater
         this.updateInfo();
-        this.infoUpdater = setInterval(() => {
+        this.infoUpdater = window.registerPollTimer(() => {
             this.updateInfo();
         }, 1000);
+
+        // Two streaming charts plus a 1s poller: stop both when hidden.
+        this.pause = () => {
+            this.charts.forEach(c => { try { c.stop(); } catch (e) {} });
+            if (this.infoUpdater) this.infoUpdater.paused = true;
+        };
+        this.resume = () => {
+            this.charts.forEach(c => { try { c.start(); } catch (e) {} });
+            if (this.infoUpdater) this.infoUpdater.paused = false;
+        };
     }
     updateInfo() {
         let time = new Date().getTime();

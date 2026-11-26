@@ -58,6 +58,7 @@ const ipc = {
     once: (channel, cb) => {
         const listener = (event, ...args) => cb(...args);
         ipcRenderer.once(channel, listener);
+        return () => ipcRenderer.removeListener(channel, listener);
     },
     invoke: (channel, ...args) => ipcRenderer.invoke(channel, ...args)
 };

@@ -71,12 +71,15 @@ class FilesystemDisplay {
         this._runNextTick = false;
         this._reading = false;
 
-        this._timer = setInterval(() => {
+        this._timer = window.registerPollTimer(() => {
             if (this._runNextTick === true) {
                 this._runNextTick = false;
                 this.readFS(this.dirpath);
             }
-        }, 1000);
+        }, 5000);
+        // fs.watch already reports changes; the 1s poll was pure redundancy
+        // (a readdir + one lstat per entry, every second, for every open panel).
+        // 5s is now only a safety net for watcher misses.
 
         // Wrap the fs bridge's callback-style methods into promises.
         // A plain object is used (not a Proxy) because the contextBridge proxy

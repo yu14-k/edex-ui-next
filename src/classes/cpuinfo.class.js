@@ -104,20 +104,34 @@ class Cpuinfo {
             this.updateCPUspeed();
             this.updatingCPUtasks = false;
             this.updateCPUtasks();
-            this.loadUpdater = setInterval(() => {
+            this.loadUpdater = window.registerPollTimer(() => {
                 this.updateCPUload();
             }, 500);
             if (process.platform !== "win32") {
-                this.tempUpdater = setInterval(() => {
+                this.tempUpdater = window.registerPollTimer(() => {
                     this.updateCPUtemp();
                 }, 2000);
             }
-            this.speedUpdater = setInterval(() => {
+            this.speedUpdater = window.registerPollTimer(() => {
                 this.updateCPUspeed();
             }, 1000);
-            this.tasksUpdater = setInterval(() => {
+            this.tasksUpdater = window.registerPollTimer(() => {
                 this.updateCPUtasks();
             }, 5000);
+
+            // Stop the per-core chart animation and all four pollers while the
+            // window is hidden (16-core machines otherwise keep drawing 2 canvases
+            // at 30fps in the background).
+            this.pause = () => {
+                this.charts.forEach(c => { try { c.stop(); } catch (e) {} });
+                [this.loadUpdater, this.tempUpdater, this.speedUpdater, this.tasksUpdater]
+                    .forEach(t => { if (t) t.paused = true; });
+            };
+            this.resume = () => {
+                this.charts.forEach(c => { try { c.start(); } catch (e) {} });
+                [this.loadUpdater, this.tempUpdater, this.speedUpdater, this.tasksUpdater]
+                    .forEach(t => { if (t) t.paused = false; });
+            };
         });
     }
     updateCPUload() {

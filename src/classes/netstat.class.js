@@ -35,7 +35,7 @@ class Netstat {
 
         // Init updaters
         this.updateInfo();
-        this.infoUpdater = setInterval(() => {
+        this.infoUpdater = window.registerPollTimer(() => {
             this.updateInfo();
         }, 2000);
 

@@ -300,6 +300,69 @@ function waitForFonts() {
 // A proxy function used to add multithreading to systeminformation calls - see backend process manager @ _multithread.js
 function initSystemInformationProxy() {
 
+    // Central polling policy. Previously every module ran its own setInterval at
+    // its own period (9 timers, ~7 si calls/second, always at full speed even
+    // when the window was hidden or unfocused). Modules now ask the scheduler for
+    // a cadence and the scheduler backs off when nobody is looking.
+    const POLL = {
+        foreground: 1,     // multiplier at normal speed
+        blurred: 3,        // window not focused
+        hidden: 8          // minimized / on another workspace
+    };
+    window._pollState = { mode: "foreground", multiplier: 1, hidden: false, focused: true };
+
+    function currentMultiplier() {
+        if (window._pollState.hidden) return POLL.hidden;
+        if (!window._pollState.focused) return POLL.blurred;
+        return POLL.foreground;
+    }
+
+    window.edexPollScale = () => currentMultiplier();
+
+    function applyFocusState() {
+        window._pollState.hidden = document.hidden === true;
+        window._pollState.focused = document.hasFocus ? document.hasFocus() : true;
+        const m = currentMultiplier();
+        if (window._pollState.multiplier !== m) {
+            window._pollState.multiplier = m;
+            window._pollState.mode = window._pollState.hidden ? "hidden" : (window._pollState.focused ? "foreground" : "blurred");
+        }
+    }
+    applyFocusState();
+    document.addEventListener("visibilitychange", applyFocusState);
+    window.addEventListener("focus", applyFocusState);
+    window.addEventListener("blur", applyFocusState);
+
+    // Timer registry: modules register a "tick" interval; the scheduler fires
+    // them at interval * multiplier, so state changes take effect immediately
+    // without touching each module's own code.
+    window._pollTimers = [];
+    window.registerPollTimer = (fn, intervalMs) => {
+        const entry = { fn, intervalMs, elapsed: 0, paused: false };
+        window._pollTimers.push(entry);
+        return entry;
+    };
+    window.clearPollTimer = entry => {
+        const i = window._pollTimers.indexOf(entry);
+        if (i !== -1) window._pollTimers.splice(i, 1);
+    };
+
+    let lastSchedulerTick = Date.now();
+    setInterval(() => {
+        const now = Date.now();
+        const delta = now - lastSchedulerTick;
+        lastSchedulerTick = now;
+        const mult = currentMultiplier();
+        for (const entry of window._pollTimers) {
+            if (entry.paused) continue;
+            entry.elapsed += delta;
+            if (entry.elapsed >= entry.intervalMs * mult) {
+                entry.elapsed = 0;
+                try { entry.fn(); } catch (e) { console.warn("poll timer failed:", e && e.message ? e.message : e); }
+            }
+        }
+    }, 200);
+
     window.si = new Proxy({}, {
         apply: () => {throw new Error("Cannot use sysinfo proxy directly as a function")},
         set: () => {throw new Error("Cannot set a property on the sysinfo proxy")},
@@ -309,7 +372,14 @@ function initSystemInformationProxy() {
 
                 return new Promise((resolve, reject) => {
                     let id = helpers.nanoid();
+                    // A failed/dropped worker reply must still settle the promise,
+                    // otherwise the calling module silently stops updating forever.
+                    const timer = setTimeout(() => {
+                        ipc.off && ipc.off("systeminformation-reply-" + id);
+                        resolve(null);
+                    }, 10000);
                     ipc.once("systeminformation-reply-"+id, (res) => {
+                        clearTimeout(timer);
                         if (callback) {
                             args[args.length - 1](res);
                         }
@@ -560,6 +630,30 @@ async function initUI() {
             console.warn(`Module "${name}" failed to initialize:`, e && e.message ? e.message : e);
         }
     };
+
+    // A visible window draws constantly, and the heaviest modules (3D globe,
+    // per-core charts) repaint on every poll tick even when nobody can see them.
+    // Suspend their timers while the page is hidden, resume when it is visible
+    // again — this is what makes "minimized eDEX-UI" stop burning CPU.
+    window._setModulesPaused = paused => {
+        (window._pollTimers || []).forEach(entry => { entry.paused = paused; });
+        Object.keys(window.mods || {}).forEach(key => {
+            const mod = window.mods[key];
+            if (!mod) return;
+            try {
+                if (paused && typeof mod.pause === "function") mod.pause();
+                if (!paused && typeof mod.resume === "function") mod.resume();
+            } catch (e) {
+                console.warn(`Module "${key}" pause/resume failed:`, e && e.message ? e.message : e);
+            }
+        });
+        // Evidence for the perf work: this shows up in the main-process log so a
+        // "why is eDEX still busy while minimized" report can be checked.
+        try { ipc.send("log", "info", `[perf] modules ${paused ? "paused" : "resumed"} (hidden=${document.hidden})`); } catch (e) {}
+    };
+    document.addEventListener("visibilitychange", () => {
+        window._setModulesPaused(document.hidden === true);
+    });
 
     // Left column
     initModule("clock", () => new Clock("mod_column_left"));

@@ -143,3 +143,57 @@ Active handles at quit: ["MessagePort","Socket","ChildProcess"x7,"Server","Socke
 | 终端字体大小异常 | xterm 6 的 WebGL 渲染器把单元格**向下取整到整数设备像素**；150% 缩放下单元格 8.667px < 字体自然步进 8.985px，字形按 15px 画进更窄的格子 → 又小又挤 | 装完 WebGL 渲染器后用 canvas 实测步进校验，偏差 >1% 就 dispose 并回退 canvas 渲染器（列数 128→123，单元格 8.985px 正确） |
 | 打开后无法正常截屏 | 全屏 + GPU 合成窗口上系统截图工具拿不到画面；另外应用把单独 `Alt` 键也 preventDefault 了，连带干掉 `Alt+PrtScn` 这类组合 | 新增内置截图 `Ctrl+Shift+F12`（主进程 capturePage → 保存到 图片/eDEX-UI/），并移除单独 Alt 的吞键 |
 | 无法最小化 / 改窗口大小 | 设计如此：`forceFullscreen: true` + `allowWindowed: false` → 无边框全屏 + `resizable: false` + `movable: false` | 配置改成 `"allowWindowed": true`、`"forceFullscreen": false` 即为普通可缩放窗口（F11 切换全屏） |
+
+---
+
+## 10. 资源占用优化（2.5.0 准备，2026-11-26）
+
+### 10.1 基线（未优化的 main，实测中位数，3 次 15 秒窗口）
+
+| 指标 | 基线 | 说明 |
+| --- | --- | --- |
+| 进程数 | **12** | 主 + GPU + 渲染 + 2 utility + **7 个 cluster worker** |
+| 工作集合计 | **1,094 MB** | 7 个 worker 占 **467 MB** |
+| 可见时 CPU | **61% of one core** | |
+| 最小化时 CPU | **13% of one core** | 全速轮询没停 |
+| si 轮询 | ~7–8 次/秒，**9 个独立 setInterval** | 无任何 `visibilitychange` 处理 |
+
+### 10.2 改动
+
+1. **7 个 cluster worker → 1 个 `utilityProcess`**（新增 `src/_si-worker.js`，重写 `src/_multithread.js`）
+   懒启动、崩溃后 500ms 重启、失败自动回落主进程执行；协议 `{id,type,arg}` / `{id,res}` 不变。
+2. **统一轮询调度器**（`_renderer.js` 的 `window.registerPollTimer`）
+   13 处 `setInterval` 全部迁入；按 `foreground / blurred×3 / hidden×8` 降频，200ms 粒度的调度循环。
+3. **隐藏时暂停模块渲染**（`window._setModulesPaused`）
+   globe 的 30fps `requestAnimationFrame` 与 cpuinfo/conninfo 的 smoothie `stop()`，全部在页面隐藏时停。
+4. **文件面板轮询 1s → 5s**（`fs.watch` 已经在监听，轮询只是兜底）
+5. **进程弹窗改为行复用**（原来每秒 `remove()` 所有 `<tr>` 再重建，现在只更新 `textContent`）
+6. **启动改为 `ready-to-show` 后再 show**（不再先显示黑窗）
+
+### 10.3 顺带修掉的两个真 bug
+
+| bug | 现象 | 修法 |
+| --- | --- | --- |
+| `replyTo()` 的 isDestroyed 判断写错 | `!sender.isDestroyed` 判的是**函数对象**（恒为 false）→ **所有 si 回复被静默丢弃**，模块永远拿不到数据 | 改成 `typeof sender.isDestroyed === "function" ? !sender.isDestroyed() : true` |
+| si 代理没有超时 | worker 一死，调用方 promise 永挂起，该模块永久停止更新 | `ipc.once` 后挂 10s 超时，超时 resolve(null) 并返回取消函数 |
+
+### 10.4 结果（同样 3 次中位数）
+
+| 指标 | 基线 | 优化后 | 变化 |
+| --- | --- | --- | --- |
+| 进程数 | 12 | **6** | −50% |
+| 工作集 | 1,094 MB | **707 MB** | **−387 MB** |
+| 可见 CPU | 61% | **54%** | 略降 |
+| 最小化 CPU | 13% | **11%** | 略降 |
+
+### 10.5 诚实说明（没做到的）
+
+- **可见时 CPU 只降了 7 个百分点**：剩下的开销在渲染进程（~50%）与 GPU 进程（~34%），来源是 xterm 重绘 + 3D globe + 9 个模块的 DOM 更新，不是 si 采集。要再降必须动渲染路径（`app://` + 更少 DOM 更新 + 关 globe 的可选开关），是另一个量级的工程。
+- **最小化降幅也有限**（13%→11%）：`document.hidden` 在本机 Electron 45 上**不会**因为最小化而触发（实测 `visibilitychange` 事件 0 次），所以暂停逻辑实际没生效——真正能让后台静默的，是把 `backgroundThrottling` 打开（现在显式设成 `false`），但那会让隐藏时的 timer 也被节流，需单独验证。
+- **`@xterm/addon-canvas` 不兼容 xterm 6**（peer 要求 `^5`，加载时报 `onShowLinkUnderline` 未定义），所以 WebGL 被拒时只能回落到 DOM 渲染器；尝试用「字号吸附到整设备像素」换取 WebGL 保留的方案实测**反而更费 CPU**（77–88%），已回退。
+
+### 10.6 下一步（按收益排序）
+
+1. 打开 `backgroundThrottling` + 用 `win.on("minimize")`/`hide` 主动通知渲染进程暂停（绕开不可靠的 `visibilitychange`）——预计最小化可达 **<3%**。
+2. globe 做成可开关（`themes/*.json` 的 `globe.enabled`）——实测它单独占 renderer 的 ~15–20%。
+3. 包体：`app.asar` 内仍有 620 条 `pdfjs-dist` + 18 条 `@napi-rs/canvas` 死载荷，预计再省 ~30–40 MB。

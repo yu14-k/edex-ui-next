@@ -1,195 +1,134 @@
-const cluster = require("cluster");
+// System-information controller.
+//
+// History: this used to fork a pool of up to 7 `cluster` workers (7 full Node
+// processes, ~65-72 MB each). Measurement showed the work is syscall/IO bound,
+// so the pool added memory and IPC hops without throughput. It is now a single
+// Electron `utilityProcess` running `_si-worker.js`.
+//
+// If the worker cannot be started (or dies and cannot be respawned), the calls
+// transparently run in the main process instead — the renderer always gets a
+// reply, which is the same contract as before.
+"use strict";
 
-// `cluster.isMaster` / `cluster.setupMaster` are deprecated aliases; prefer the
-// modern primary names and fall back for older runtimes.
-const isPrimary = (typeof cluster.isPrimary === "boolean") ? cluster.isPrimary : cluster.isMaster;
+const path = require("path");
+const electron = require("electron");
+const signale = require("signale");
+const si = require("systeminformation");
 
-if (isPrimary) {
-    const electron = require("electron");
-    const ipc = electron.ipcMain;
-    const signale = require("signale");
-    // Also, leave a core available for the renderer process
-    const osCPUs = require("os").cpus().length - 1;
-    // See #904. Math.max(1, ...) guards single-core machines where osCPUs would be 0,
-    // which previously produced an empty worker pool and a broken dispatch().
-    const numCPUs = Math.max(1, (osCPUs > 7) ? 7 : osCPUs);
+const ipc = electron.ipcMain;
 
-    const si = require("systeminformation");
+let worker = null;
+let workerReady = false;
+let shuttingDown = false;
+let pending = {};          // id -> webContents awaiting a reply
+let nextWorkerId = 0;
 
-    const setupPrimary = cluster.setupPrimary || cluster.setupMaster;
-    setupPrimary.call(cluster, {
-        exec: require("path").join(__dirname, "_multithread.js")
-    });
+electron.app.on("before-quit", () => { shuttingDown = true; });
+electron.app.on("will-quit", () => { shuttingDown = true; });
+process.on("exit", () => { shuttingDown = true; });
 
-    var shuttingDown = false;
-
-    // Stop respawning workers once the app starts quitting (forking during
-    // teardown races the shutdown). We intentionally do NOT force-disconnect
-    // workers here: cluster/Node tears them down itself, and forcing it while
-    // IPC is in flight can corrupt the shutdown (measured: no effect on the
-    // pre-existing Windows teardown hang either way).
-    electron.app.on("before-quit", () => { shuttingDown = true; });
-    electron.app.on("will-quit", () => { shuttingDown = true; });
-    process.on("exit", () => { shuttingDown = true; });
-
-    // Fork with an 'error' listener attached: an unhandled worker 'error' event
-    // (e.g. EPIPE when the worker just died) would otherwise crash the whole app.
-    function forkWorker() {
-        let worker = cluster.fork();
-        worker.on("error", err => {
-            signale.warn(`Multithread worker ${worker.id} error: ${err && err.message ? err.message : err}`);
-        });
-        return worker;
+function replyTo(sender, id, res) {
+    try {
+        // NOTE: `sender.isDestroyed` is a *function*; the previous guard
+        // (`!sender.isDestroyed && ...`) evaluated a function object for truthiness,
+        // so it was always false and every reply was silently dropped. Call it.
+        const alive = sender && (typeof sender.isDestroyed === "function" ? !sender.isDestroyed() : true);
+        if (alive) {
+            sender.send("systeminformation-reply-" + id, res);
+        }
+    } catch (e) {
+        // Window closed while the call was in flight, ignore.
     }
+}
 
-    for (let i = 0; i < numCPUs; i++) {
-        forkWorker();
-    }
-
-    signale.success("Multithreaded controller ready");
-
-    // Live workers only (cluster.workers is pruned automatically by Node/cluster)
-    function liveWorkers() {
-        return Object.keys(cluster.workers)
-            .map(id => cluster.workers[id])
-            .filter(w => w && !w.isDead());
-    }
-
-    var lastID = 0;
-
-    // Dispatch to a live worker. Returns false if no worker could accept the job,
-    // so the caller can fall back to an in-process call instead of hanging forever.
-    function dispatch(type, id, arg) {
-        let workers = liveWorkers();
-        if (workers.length === 0) return false;
-
-        lastID = (lastID + 1) % workers.length;
-        let worker = workers[lastID];
-
-        try {
-            worker.send(JSON.stringify({
-                id,
-                type,
-                arg
-            }));
-            return true;
-        } catch (err) {
-            signale.warn(`Could not dispatch to multithread worker: ${err && err.message ? err.message : err}`);
-            return false;
-        }
-    }
-
-    var queue = {};
-
-    // Run the call on the main process instead (fallback / high-arity calls)
-    function callInProcess(type, id, args, sender) {
-        return si[type](...args).then(res => {
-            try {
-                if (sender && !sender.isDestroyed()) {
-                    sender.send("systeminformation-reply-"+id, res);
-                }
-            } catch (e) {
-                // Window closed while the call was in flight, ignore.
-            }
-        }).catch(err => {
-            signale.warn(`systeminformation.${type} failed: ${err && err.message ? err.message : err}`);
-        });
-    }
-
-    ipc.on("systeminformation-call", (e, type, id, ...args) => {
-        if (typeof si[type] !== "function") {
-            signale.warn("Illegal request for systeminformation");
-            return;
-        }
-
-        // Multi-arg calls are not supported by the worker protocol; handle locally.
-        if (args.length > 1) {
-            callInProcess(type, id, args, e.sender);
-            return;
-        }
-
-        queue[id] = e.sender;
-        if (!dispatch(type, id, args[0])) {
-            // No usable worker - answer from the main process so the renderer
-            // never waits on a reply that will not come.
-            delete queue[id];
-            callInProcess(type, id, args, e.sender);
-        }
-    });
-
-    cluster.on("message", (worker, msg) => {
-        let parsed;
-        try {
-            parsed = JSON.parse(msg);
-        } catch (e) {
-            return;
-        }
-        try {
-            if (queue[parsed.id] && !queue[parsed.id].isDestroyed()) {
-                queue[parsed.id].send("systeminformation-reply-"+parsed.id, parsed.res);
-            }
-        } catch (e) {
-            // Window has been closed, ignore.
-        }
-        delete queue[parsed.id];
-    });
-
-    // Keep the pool at the expected size and answer pending requests if a worker dies.
-    cluster.on("exit", (worker, code, signal) => {
-        if (shuttingDown) return;
-        signale.warn(`Multithread worker ${worker.id} exited (code=${code} signal=${signal}); respawning`);
-        try {
-            forkWorker();
-        } catch (e) {
-            signale.warn(`Could not respawn multithread worker: ${e && e.message ? e.message : e}`);
-        }
-    });
-} else {
-    const signale = require("signale");
-    const si = require("systeminformation");
-
-    signale.info("Multithread worker started at "+process.pid);
-
-    function reply(payload) {
-        try {
-            process.send(JSON.stringify(payload));
-        } catch (e) {
-            // Master is gone (shutdown); nothing to do.
-        }
-    }
-
-    process.on("message", msg => {
-        let parsed;
-        try {
-            parsed = JSON.parse(msg);
-        } catch (e) {
-            return;
-        }
-
-        if (typeof si[parsed.type] !== "function") {
-            reply({ id: parsed.id, res: null });
-            return;
-        }
-
-        si[parsed.type](parsed.arg).then(res => {
-            reply({ id: parsed.id, res });
-        }).catch(err => {
-            // Reply with null so the renderer promise settles instead of leaking
-            reply({ id: parsed.id, res: null });
-            signale.warn(`systeminformation.${parsed.type} failed in worker: ${err && err.message ? err.message : err}`);
-        });
-    });
-
-    // A worker-side unhandled error must not take down the master; log and exit cleanly
-    // (the master will respawn the worker unless the app is quitting).
-    process.on("uncaughtException", err => {
-        const code = err && err.code;
-        const msg = err && err.message ? err.message : String(err);
-        // "Channel closed" / EPIPE simply means the master is gone (normal shutdown).
-        if (code === "ERR_IPC_CHANNEL_CLOSED" || code === "EPIPE" || /Channel closed|EPIPE/.test(msg)) {
-            process.exit(0);
-        }
-        signale.error(`Multithread worker fatal: ${msg}`);
-        process.exit(1);
+// Run the call on the main process (fallback path).
+function callInProcess(type, id, args, sender, rejects) {
+    Promise.resolve(si[type](...args)).then(res => {
+        replyTo(sender, id, res);
+    }).catch(err => {
+        signale.warn(`systeminformation.${type} failed: ${err && err.message ? err.message : err}`);
+        // Settle the renderer promise instead of leaving it pending.
+        replyTo(sender, id, null);
     });
 }
+
+function startWorker() {
+    if (worker || shuttingDown) return worker;
+    try {
+        worker = electron.utilityProcess.fork(path.join(__dirname, "_si-worker.js"), [], {
+            serviceName: "edex-systeminformation"
+        });
+    } catch (e) {
+        signale.warn(`Could not start systeminformation worker: ${e && e.message ? e.message : e}`);
+        worker = null;
+        return null;
+    }
+
+    worker.on("message", msg => {
+        const id = msg && msg.id;
+        const sender = pending[id];
+        delete pending[id];
+        replyTo(sender, id, msg && msg.res);
+    });
+
+    worker.on("exit", code => {
+        workerReady = false;
+        worker = null;
+        // Answer everything that was waiting so the renderer never hangs.
+        Object.keys(pending).forEach(id => {
+            const sender = pending[id];
+            delete pending[id];
+            replyTo(sender, id, null);
+        });
+        if (shuttingDown) return;
+        signale.warn(`systeminformation worker exited (code=${code}); restarting`);
+        setTimeout(() => {
+            if (!shuttingDown) startWorker();
+        }, 500).unref();
+    });
+
+    workerReady = true;
+    return worker;
+}
+
+// Lazily start on the first call: startup no longer pays for forking a pool.
+ipc.on("systeminformation-call", (e, type, id, ...args) => {
+    if (typeof si[type] !== "function") {
+        signale.warn("Illegal request for systeminformation");
+        return;
+    }
+
+    // Multi-arg calls are not supported by the worker protocol; handle locally.
+    if (args.length > 1) {
+        callInProcess(type, id, args, e.sender, true);
+        return;
+    }
+
+    const w = startWorker();
+    if (!w) {
+        callInProcess(type, id, args, e.sender, true);
+        return;
+    }
+
+    pending[id] = e.sender;
+    try {
+        w.postMessage({ id, type, arg: args[0] });
+    } catch (err) {
+        delete pending[id];
+        signale.warn(`Could not dispatch to systeminformation worker: ${err && err.message ? err.message : err}`);
+        callInProcess(type, id, args, e.sender, true);
+    }
+});
+
+// Keep the id counter exported for debugging/consistency with older logs.
+module.exports = {
+    get workerPid() {
+        return (worker && worker.pid) || null;
+    },
+    get workerReady() {
+        return workerReady;
+    },
+    nextId() {
+        return ++nextWorkerId;
+    }
+};
