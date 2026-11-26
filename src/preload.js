@@ -91,6 +91,9 @@ const fsBridge = {
     readFileSync: (p, enc) => fs.readFileSync(p, enc),
     writeFileSync: (p, data, enc) => fs.writeFileSync(p, data, enc),
     existsSync: (p) => fs.existsSync(p),
+    // Needed by profile saving (userData/profiles/) — the earlier "unused member"
+    // cleanup removed it, which silently broke create-on-demand directories.
+    mkdirSync: (p, opts) => fs.mkdirSync(p, opts),
     readdirSync: (p, opts) => fs.readdirSync(p, opts),
     readdir: (p, cb) => fs.readdir(p, cb),
     lstat: (p, cb) => fs.lstat(p, (err, stats) => {

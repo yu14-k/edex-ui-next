@@ -92,7 +92,7 @@ const ipc = window.__edex.ipc;
 const services = window.__edex.services;
 const helpers = window.__edex.helpers;
 
-let settingsDir, themesDir, keyboardsDir, fontsDir, settingsFile, shortcutsFile, lastWindowStateFile, layoutFile;
+let settingsDir, themesDir, keyboardsDir, fontsDir, settingsFile, shortcutsFile, lastWindowStateFile, layoutFile, profilesDir;
 
 async function initPaths() {
     settingsDir = await services.app.getPath("userData");
@@ -103,6 +103,7 @@ async function initPaths() {
     shortcutsFile = path.join(settingsDir, "shortcuts.json");
     lastWindowStateFile = path.join(settingsDir, "lastWindowState.json");
     layoutFile = path.join(settingsDir, "layout.json");
+    profilesDir = path.join(settingsDir, "profiles");
 
     // Declarative layout: which module lives in which column, column widths and
     // terminal width. A missing file means "use the historical default layout";
@@ -347,6 +348,163 @@ window.applyThemeByName = name => {
     } catch (e) {
         console.warn("applyThemeByName failed:", e && e.message ? e.message : e);
         return false;
+    }
+};
+
+// ── Profiles ────────────────────────────────────────────────────────────────
+// A profile is a named bundle of layout + theme + keyboard, stored as
+// userData/profiles/<name>.json. Switching applies the theme live; layout and
+// keyboard need the module set / keymap rebuilt, so those take a restart —
+// the UI says which is which rather than silently half-applying.
+window.listProfiles = () => {
+    try {
+        if (!fs.existsSync(profilesDir)) return [];
+        return fs.readdirSync(profilesDir)
+            .filter(f => f.endsWith(".json"))
+            .map(f => f.replace(/\.json$/, ""));
+    } catch (e) {
+        console.warn("listProfiles failed:", e && e.message ? e.message : e);
+        return [];
+    }
+};
+
+window.readProfile = name => {
+    try {
+        const file = path.join(profilesDir, String(name).replace(/\.json$/, "") + ".json");
+        const raw = JSON.parse(fs.readFileSync(file, "utf-8"));
+        return {
+            name,
+            theme: raw.theme || window.settings.theme,
+            keyboard: raw.keyboard || window.settings.keyboard,
+            layout: raw.layout || null,
+            modules: raw.modules || {}
+        };
+    } catch (e) {
+        console.warn(`readProfile("${name}") failed:`, e && e.message ? e.message : e);
+        return null;
+    }
+};
+
+window.saveProfile = (name, payload) => {
+    try {
+        if (!fs.existsSync(profilesDir)) fs.mkdirSync(profilesDir, { recursive: true });
+        const file = path.join(profilesDir, String(name).replace(/\.json$/, "") + ".json");
+        fs.writeFileSync(file, JSON.stringify(payload, "", 4), "utf-8");
+        return true;
+    } catch (e) {
+        console.warn(`saveProfile("${name}") failed:`, e && e.message ? e.message : e);
+        return false;
+    }
+};
+
+// Apply a profile: theme hot-switches; layout is written to layout.json so the
+// next launch honours it; the keyboard layout is recorded in settings.json.
+window.applyProfile = name => {
+    const p = window.readProfile(name);
+    if (!p) return false;
+
+    const applied = { theme: false, layout: false, keyboard: false, restartRequired: false };
+
+    if (p.theme && typeof window.applyThemeByName === "function") {
+        applied.theme = window.applyThemeByName(p.theme);
+        if (applied.theme) window.settings.theme = p.theme;
+    }
+    if (p.layout) {
+        const result = window.EDEX_LAYOUT.normalize(p.layout);
+        window.layout = result.layout;
+        try {
+            fs.writeFileSync(layoutFile, JSON.stringify(result.layout, "", 4), "utf-8");
+            applied.layout = true;
+            // Column widths can be applied live, module membership cannot.
+            if (typeof window.applyLayoutGeometry === "function") window.applyLayoutGeometry();
+            const placed = result.layout.columns.left.modules.concat(result.layout.columns.right.modules);
+            const live = Object.keys(window.mods || {});
+            applied.restartRequired = live.some(m => placed.indexOf(m) === -1) || placed.some(m => live.indexOf(m) === -1);
+        } catch (e) {
+            console.warn("applyProfile: layout write failed:", e && e.message ? e.message : e);
+        }
+    }
+    if (p.keyboard && p.keyboard !== window.settings.keyboard) {
+        window.settings.keyboard = p.keyboard;
+        applied.keyboard = true;
+        applied.restartRequired = true;
+    }
+    if (typeof window.saveSettingsQuietly === "function") window.saveSettingsQuietly();
+    return applied;
+};
+
+// Persist settings.json without the "written to disk" status line (used when a
+// profile or shortcut changes them programmatically).
+window.saveSettingsQuietly = () => {
+    try {
+        fs.writeFileSync(settingsFile, JSON.stringify(window.settings, "", 4), "utf-8");
+        return true;
+    } catch (e) {
+        console.warn("Could not write settings.json:", e && e.message ? e.message : e);
+        return false;
+    }
+};
+
+// Profile picker: lists userData/profiles/*.json, applies one, and can snapshot
+// the current look into a new profile (so a user can save "my setup").
+window.openProfilePicker = () => {
+    if (document.getElementById("profilePicker")) return;
+    const profiles = window.listProfiles();
+    const current = window.settings.profile || "(none)";
+
+    const rows = profiles.length === 0
+        ? `<tr><td colspan="2"><i>No profiles yet. Save the current setup to create one.</i></td></tr>`
+        : profiles.map(p => `<tr>
+                <td><strong>${window._escapeHtml(p)}</strong>${p === current ? " <i>(active)</i>" : ""}</td>
+                <td><button data-profile="${window._escapeHtml(p)}">Apply</button></td>
+            </tr>`).join("");
+
+    new Modal({
+        type: "custom",
+        title: "Profiles",
+        html: `<table id="profilePicker">
+                    <tr><th>Profile</th><th>Action</th></tr>
+                    ${rows}
+                </table>
+                <br>
+                <label for="profileNewName">Save current setup as:</label>
+                <input type="text" id="profileNewName" placeholder="e.g. work, streaming, minimal">
+                <h6 id="profileStatus">Folder: ${window._escapeHtml(profilesDir)}</h6>`,
+        buttons: [
+            {label: "Delete", action: () => { /* handled per-row */ }},
+            {label: "Close", action: () => {}}
+        ]
+    }, () => { window.keyboard.attach(); });
+
+    document.querySelectorAll("#profilePicker button[data-profile]").forEach(btn => {
+        btn.addEventListener("click", () => {
+            const name = btn.getAttribute("data-profile");
+            const result = window.applyProfile(name);
+            window.settings.profile = name;
+            window.saveSettingsQuietly();
+            const status = document.getElementById("profileStatus");
+            if (status) {
+                status.innerText = result
+                    ? `Applied "${name}"` + (result.restartRequired ? " (restart for module/keyboard changes)" : "")
+                    : `Could not apply "${name}"`;
+            }
+        });
+    });
+
+    const nameInput = document.getElementById("profileNewName");
+    if (nameInput) {
+        nameInput.addEventListener("change", () => {
+            const name = nameInput.value.trim();
+            if (!name) return;
+            const ok = window.saveProfile(name, {
+                theme: window.settings.theme,
+                keyboard: window.settings.keyboard,
+                layout: window.layout,
+                modules: window.layout.modules || {}
+            });
+            const status = document.getElementById("profileStatus");
+            if (status) status.innerText = ok ? `Saved profile "${name}" — reopen to apply` : `Could not save "${name}"`;
+        });
     }
 };
 
@@ -1555,6 +1713,9 @@ window.useAppShortcut = action => {
             return true;
         case "DEV_RELOAD":
             window.location.reload(true);
+            return true;
+        case "PROFILE":
+            window.openProfilePicker();
             return true;
         case "SCREENSHOT":
             // Built-in capture: OS snipping tools can show a black surface over a

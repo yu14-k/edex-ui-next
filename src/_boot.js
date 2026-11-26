@@ -393,6 +393,7 @@ const DEFAULT_SHORTCUTS = [
     { type: "app", trigger: "Ctrl+Shift+H", action: "FS_DOTFILES", enabled: true },
     { type: "app", trigger: "Ctrl+Shift+P", action: "KB_PASSMODE", enabled: true },
     { type: "app", trigger: "Ctrl+Shift+F12", action: "SCREENSHOT", enabled: true },
+    { type: "app", trigger: "Ctrl+Shift+O", action: "PROFILE", enabled: true },
     { type: "app", trigger: "Ctrl+Shift+I", action: "DEV_DEBUG", enabled: false },
     { type: "app", trigger: "Ctrl+Shift+F5", action: "DEV_RELOAD", enabled: true },
     { type: "shell", trigger: "Ctrl+Shift+Alt+Space", action: "neofetch", linebreak: true, enabled: false }

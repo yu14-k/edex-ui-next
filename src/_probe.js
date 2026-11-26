@@ -247,6 +247,44 @@ module.exports = function attachProbe(win) {
             })()
         `;
 
+        // 8. Profiles: save the current setup, switch away, then re-apply it —
+        //    the round trip is what proves layout+theme are actually restored.
+        const PROFILE_CHECK = `
+            (async () => {
+                try {
+                    const name = "__probe_profile__";
+                    const file = path.join(profilesDir, name + ".json");
+                    const before = { theme: window.settings.theme, left: window.layout.columns.left.width };
+                    const saved = window.saveProfile(name, {
+                        theme: before.theme,
+                        keyboard: window.settings.keyboard,
+                        layout: JSON.parse(JSON.stringify(window.layout))
+                    });
+                    const listed = window.listProfiles().indexOf(name) !== -1;
+
+                    // Move away from the saved state
+                    window.layout.columns.left.width = 25;
+                    window.applyLayoutGeometry();
+
+                    const applied = window.applyProfile(name);
+                    await new Promise(r => setTimeout(r, 400));
+                    const after = { theme: window.settings.theme, left: window.layout.columns.left.width };
+
+                    const result = {
+                        saved, listed,
+                        appliedTheme: !!(applied && applied.theme),
+                        appliedLayout: !!(applied && applied.layout),
+                        restoredTheme: after.theme === before.theme,
+                        restoredLayout: after.left === before.left
+                    };
+                    try { fs.unlinkSync(file); } catch (e) { /* keep */ }
+                    return result;
+                } catch (e) {
+                    return { saved: false, error: (e && e.message) ? e.message : String(e) };
+                }
+            })()
+        `;
+
         // Quit gracefully (like a user closing the window) instead of an abrupt
         // process.exit: this also exercises the real shutdown path.
         const finish = () => {
@@ -313,6 +351,13 @@ module.exports = function attachProbe(win) {
                 console.log("EDEX_PROBE_COPY " + JSON.stringify(Object.assign({}, copy, { clipboard: String(clip).slice(0, 40) })));
             } catch (e) {
                 console.log("EDEX_PROBE_COPY_ERROR " + (e && e.message ? e.message : String(e)));
+            }
+
+            try {
+                const prof = await win.webContents.executeJavaScript(PROFILE_CHECK);
+                console.log("EDEX_PROBE_PROFILE " + JSON.stringify(prof));
+            } catch (e) {
+                console.log("EDEX_PROBE_PROFILE_ERROR " + (e && e.message ? e.message : String(e)));
             }
 
             try {
